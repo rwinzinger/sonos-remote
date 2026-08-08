@@ -1,0 +1,20 @@
+# Credentials — NEVER commit. secrets.h holds the WiFi password.
+# Any file named secrets.h anywhere in the tree is ignored, at any depth.
+secrets.h
+**/secrets.h
+
+# The committed template is the exception: it carries placeholders only.
+!secrets.h.example
+!**/secrets.h.example
+
+# Arduino / arduino-cli build output
+build/
+*.bin
+*.elf
+*.map
+*.hex
+
+# Editor / OS noise
+.DS_Store
+*.swp
+*~

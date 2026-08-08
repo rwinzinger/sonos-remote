@@ -1,0 +1,39 @@
+Sonos Remote Control
+
+The Problem: As Sonos has hardly any hardware controls, some day-to-day activities need pulling out the app which is just 
+disappointing and tedious. On top of that, the speaker "Main" is Alexa enabled, but some commands like volume up/down would
+only apply to the Era 300 but not to the whole group. Since joining the stereo pair to the system, auto-play when starting
+the record player usually does not work. Joining the stereos to the system also requires the app every now and then. Sometimes,
+I'm also using the right speaker of "Stereo" for streaming audio from my TV via bluetooth. If a guest wants to control the 
+system, they are basically helpless as they won't have the Sonos app at all.
+
+The Solution: Our Sonos Remote Control, based on the Elecrow rotary dial should offer simply and quick access to day to day
+actvities without having to pull out the app. 
+
+The Day-to-Day Activities:
+
+1) using the rotary dial to change the volume of the currently active speakers - no matter whether this is "Main" only, "Stereo"
+only, or all of the speakers as a group
+
+2) activating line-in for the record player, no matter which speaker are currently active. We might have to activate "Main" for 
+this if necessary because the record player is attached to "Main" (line-in "Plattenspieler")
+
+3) activate / deactivate "Main" and "Stereo". Probably, "Main" always has to be there as it is the component which is voice 
+enabled and will run radio, it's the component with the line-in for the record player, and it's the target for streaming music
+via Apple Airplay.
+For streaming TV audio, "Stereo"-only or even the right speaker of "Stereo" only might be a scenario.
+
+UX & UI Screens:
+
+Hint: I will use times to define the positions on the rotary display (e.g. "12 o'clock" for "at the top")
+Rotary Dial always turns volume up/down. When used, the current volume should show on the screen. Simple digits for now, a more
+appealing UI (e.g. Gauge) can be added later. Using the rotary dial should always be possible. Changing the volume appllies to
+all active speakers.
+
+Screen 1 (main screen): The screen shows three buttons "Main", "Stereo", "Records" and the current volume. The buttons should 
+be used like a toggle. For example, one can see whether "Stereo" is currently active or not and by clicking it, the user can 
+toggle the state. The buttons / volume display should be arranged is follows:
+"12 o'clock": "Records"
+"9 o'clock": "Main"
+"3 o'clock": "Stereo"
+"6 o'clock": voluke display

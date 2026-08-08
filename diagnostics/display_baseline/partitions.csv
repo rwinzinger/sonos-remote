@@ -1,0 +1,17 @@
+# Custom partition table for the 16 MB flash on the CrowPanel 2.1".
+#
+# Why this exists: Elecrow's RotaryScreen_2_1 demo links to ~6.4 MB of code+assets (the
+# bundled `UI` library is 40 MB of SquareLine image arrays, and lv_conf.h enables the
+# LVGL demos plus every Montserrat font 10-48). The largest stock scheme, huge_app, caps
+# the app at 3 MB, so the demo cannot fit any built-in layout. Flash size confirmed as
+# 16 MB via `esptool flash_id`.
+#
+# 10 MB app leaves generous headroom over the 6.4 MB binary. No OTA (single app slot) —
+# this board is always USB-tethered, so OTA buys nothing.
+#
+# Name,     Type, SubType,  Offset,   Size,      Flags
+nvs,        data, nvs,      0x9000,   0x5000,
+otadata,    data, ota,      0xe000,   0x2000,
+app0,       app,  ota_0,    0x10000,  0xA00000,
+spiffs,     data, spiffs,   0xA10000, 0x5E0000,
+coredump,   data, coredump, 0xFF0000, 0x10000,
