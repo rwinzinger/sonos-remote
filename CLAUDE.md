@@ -621,12 +621,8 @@ Done and verified on hardware:
   outrun the speakers until the next 5 s poll.
 
 Still open:
-- **The Sonos wordmark in the centre is letter-spaced TEXT**, not the real logo. The device
-  ICONS are genuine (fetched from the speakers); the wordmark would need a PNG to embed.
-- **Play/pause has no control surface** — the dial press now toggles Stereo.
-- The `DIAG_HEARTBEAT_ONLY` block in the `.ino` is dead code (guarded, set to 0). Kept as a
-  bisect tool; delete once things are stable.
 - `sonos-remote/infos.txt` holds stale commands (old FQBN, `PartitionScheme=default`, and
   `arduino-cli monitor` piping which does not work) — use CLAUDE.md instead.
-- `SONOS_COORDINATOR_IP` in `secrets.h` is a DHCP-dependent **seed**. Harmless once NVS is
-  populated, but it will go stale if that speaker changes address.
+- `sonos-remote/specs.txt` line 24 ("right speaker of Stereo only, via Bluetooth") is now
+  DONE — TV mode splits the pair and the Bluetooth path is confirmed. The spec text itself
+  still reads as an open wish; update it if the file is ever revised.
