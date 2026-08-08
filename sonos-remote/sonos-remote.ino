@@ -41,8 +41,14 @@ static const uint32_t BUTTON_DEBOUNCE_MS = 50;
 static const uint32_t WIFI_TIMEOUT_MS    = 20000;
 // Blank the display after this long without any interaction. Only the backlight goes off,
 // so waking is instant; Sonos polling continues so the state is current the moment it lights.
-static const uint32_t DISPLAY_SLEEP_MS   = 120000;
-static const uint32_t DISPLAY_DIM_MS     = 110000;  // dim 10 s before blanking, as a warning
+// Two-stage idle behaviour, driven by whether anything is playing:
+//   idle >= 90 s                    -> Dim (50%)
+//   idle >= 120 s AND nothing plays -> Off
+// While something is playing the display SETTLES at Dim and never blanks; the screen only
+// goes fully dark at night when the system is silent. A misread (an unreachable speaker
+// looks stopped, so the screen blanks during playback) is acceptable by design.
+static const uint32_t DISPLAY_DIM_MS     = 90000;
+static const uint32_t DISPLAY_OFF_MS     = 120000;
 // WiFi is checked periodically because it is NOT self-healing here: connectWiFi() runs once
 // at boot, so before this a router reboot left the device dead until power-cycled.
 static const uint32_t WIFI_CHECK_MS      = 5000;
@@ -200,9 +206,9 @@ void resolveAndReport() {
 // changes, which must never happen from a blind press.
 bool noteActivity() {
   lastActivityMs = millis();
-  if (panel::displayOn()) return false;
-  panel::setDisplayOn(true);
-  return true;                        // display was asleep: this input was consumed
+  bool wasOff = !panel::displayOn();
+  panel::setLevel(panel::Level::Full);
+  return wasOff;                      // display was dark: this input only woke it
 }
 
 // Forward declarations — the worker task and its queue are defined further down, but the
@@ -857,15 +863,25 @@ void loop() {
     }
   }
 
-  // Dim as a warning 10 s before blanking.
+  // Brightness as a pure function of idle time and playback, re-evaluated every loop. This
+  // also handles playback STARTING while the screen is dark: it returns to Dim on its own,
+  // without anyone touching the device.
   {
     uint32_t idle = millis() - lastActivityMs;
-    panel::setDimmed(idle >= DISPLAY_DIM_MS);
-  }
+    bool playing = shMainActive || shStereoActive || shRightPlaying;
 
-  if (panel::displayOn() && (millis() - lastActivityMs) >= DISPLAY_SLEEP_MS) {
-    Serial.println("[ui] idle — display off");
-    panel::setDisplayOn(false);
+    panel::Level want;
+    if (idle < DISPLAY_DIM_MS)                    want = panel::Level::Full;
+    else if (playing || idle < DISPLAY_OFF_MS)    want = panel::Level::Dim;
+    else                                          want = panel::Level::Off;
+
+    if (want != panel::level()) {
+      Serial.printf("[ui] display -> %s (idle %lus, %s)\n",
+                    want == panel::Level::Full ? "full"
+                      : want == panel::Level::Dim ? "dim" : "off",
+                    (unsigned long)(idle / 1000), playing ? "playing" : "silent");
+      panel::setLevel(want);
+    }
   }
 
   // Both timers only ENQUEUE — no network call ever runs on this thread.

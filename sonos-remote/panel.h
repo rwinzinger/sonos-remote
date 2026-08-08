@@ -32,15 +32,17 @@ bool touchOk();
 
 void setBacklight(uint8_t duty);   // 0-255
 
-// --- idle blanking --------------------------------------------------------------------
-// Turning the display off is just the backlight: LCD power stays up, so waking is instant
-// and needs no panel re-init (which would flash and take ~500 ms).
-void setDisplayOn(bool on);
-bool displayOn();
+// --- idle brightness ------------------------------------------------------------------
+// Only the backlight is switched; LCD power stays up, so returning is instant and needs no
+// panel re-init (which would flash and take ~500 ms).
+//
+// Dim is a resting state, not just a warning: while music plays the display settles at Dim
+// and stays there, and only goes Off when nothing is playing.
+enum class Level { Full, Dim, Off };
 
-// Half-step before blanking: dims rather than cutting, which doubles as a warning that the
-// screen is about to sleep. Ignored while the display is fully off.
-void setDimmed(bool dim);
+void  setLevel(Level l);
+Level level();
+bool  displayOn();          // level != Off — also gates whether touches reach LVGL
 
 // True if the touchscreen was touched since the last call, and clears the flag. Reported
 // even while the display is off — but in that state the touch is NOT forwarded to LVGL, so

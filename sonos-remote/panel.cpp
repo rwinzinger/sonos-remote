@@ -31,12 +31,15 @@ Adafruit_CST8XX tsPanel = Adafruit_CST8XX();
 
 bool expanderOk_ = false;
 bool touchOk_    = false;
-bool displayOn_  = true;
+Level level_ = Level::Full;
 bool touchSeen_  = false;
 
 const uint8_t BACKLIGHT_DUTY = 204;   // the value Elecrow's demo uses
-const uint8_t BACKLIGHT_DIM  = 40;    // ~20%: clearly still on, clearly about to sleep
-bool dimmed_ = false;
+// ~15% of the full duty. Note perceived brightness is NOT linear with PWM: the eye follows
+// roughly the 1/2.2 power of it, so 30/204 still reads as maybe a third as bright rather
+// than a seventh. Lower this further if it is still too present at night; if it goes black
+// entirely the backlight driver has a cutoff and it needs raising again.
+const uint8_t BACKLIGHT_DIM  = 30;
 
 // ---- VERBATIM from RotaryScreen_2_1.ino: pin mapping and panel timings. Do not edit. ----
 Arduino_ESP32RGBPanel *bus = new Arduino_ESP32RGBPanel(
@@ -74,7 +77,7 @@ void dispFlush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) 
 void touchpadRead(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
   if (touchOk_ && tsPanel.touched()) {
     touchSeen_ = true;
-    if (!displayOn_) {
+    if (level_ == Level::Off) {
       // Swallow the wake-up tap. The buttons do consequential things — splitting a stereo
       // pair, regrouping rooms — so a blind tap on a dark screen must never trigger one.
       data->state = LV_INDEV_STATE_REL;
@@ -192,31 +195,34 @@ bool touchOk()    { return touchOk_; }
 
 void setBacklight(uint8_t duty) { ledcWrite(BL_PWM_CHANNEL, duty); }
 
-void setDisplayOn(bool on) {
-  if (on == displayOn_) return;
-  displayOn_ = on;
-  if (on) {
-    // Instant on: waking must feel immediate.
-    dimmed_ = false;
-    ledcWrite(BL_PWM_CHANNEL, BACKLIGHT_DUTY);
-  } else {
-    // Short fade out — nothing is waiting on the loop while going idle, and an abrupt
-    // cut is startling in a dark room.
-    for (int duty = BACKLIGHT_DUTY; duty >= 0; duty -= 8) {
-      ledcWrite(BL_PWM_CHANNEL, duty < 0 ? 0 : duty);
-      delay(12);
-    }
-    ledcWrite(BL_PWM_CHANNEL, 0);
+void setLevel(Level l) {
+  if (l == level_) return;
+  Level prev = level_;
+  level_ = l;
+
+  switch (l) {
+    case Level::Full:
+      // Instant: returning from Dim or Off must feel immediate.
+      ledcWrite(BL_PWM_CHANNEL, BACKLIGHT_DUTY);
+      break;
+    case Level::Dim:
+      ledcWrite(BL_PWM_CHANNEL, BACKLIGHT_DIM);
+      break;
+    case Level::Off:
+      // Short fade only on the way out — nothing is waiting on the loop while going idle,
+      // and an abrupt cut is startling in a dark room.
+      for (int duty = (prev == Level::Dim ? BACKLIGHT_DIM : BACKLIGHT_DUTY);
+           duty >= 0; duty -= 6) {
+        ledcWrite(BL_PWM_CHANNEL, duty < 0 ? 0 : duty);
+        delay(12);
+      }
+      ledcWrite(BL_PWM_CHANNEL, 0);
+      break;
   }
 }
 
-bool displayOn() { return displayOn_; }
-
-void setDimmed(bool dim) {
-  if (!displayOn_ || dim == dimmed_) return;
-  dimmed_ = dim;
-  ledcWrite(BL_PWM_CHANNEL, dim ? BACKLIGHT_DIM : BACKLIGHT_DUTY);
-}
+Level level()    { return level_; }
+bool  displayOn(){ return level_ != Level::Off; }
 
 bool consumeTouchActivity() {
   bool seen = touchSeen_;

@@ -519,12 +519,36 @@ are distinguishable.
 - Buttons need `LV_OBJ_FLAG_GESTURE_BUBBLE`, or a swipe starting on one is swallowed.
 - `Sync` sets Stereo to Main's level. After the change above it now STICKS.
 
-## Idle blanking
+## Idle brightness — three levels, driven by playback
 
-The display blanks after `DISPLAY_SLEEP_MS` (2 min) without interaction and wakes on any
-input. Only the BACKLIGHT is switched; LCD power stays up so waking is instant and needs no
-panel re-init (which would flash and cost ~500 ms). Sonos polling continues while dark, so
-the screen shows current state the moment it lights rather than a stale snapshot.
+Brightness is a PURE FUNCTION of (idle time, is anything playing), re-evaluated every loop
+rather than a one-way sequence of timers. That is what makes the screen come back on its
+own when Alexa/Bluetooth/AirPlay starts something while it is dark — no interaction needed.
+
+| Condition | Level |
+|---|---|
+| idle < `DISPLAY_DIM_MS` (90 s) | Full (duty 204) |
+| idle >= 90 s AND something playing | **Dim (duty 30, ~15%) indefinitely** |
+| idle 90-120 s, silent | Dim |
+| idle >= `DISPLAY_OFF_MS` (120 s), silent | Off |
+| playback starts while Off | back to Dim, unprompted |
+
+It returns at **Dim, not Full**: music starting at night must not light the room. Only a
+touch, the dial or the knob goes to Full.
+
+**A misread is acceptable by design.** An unreachable speaker looks stopped, so the screen
+may blank while something is actually playing. The user accepted this explicitly, which is
+why there is no "unknown vs stopped" tri-state — it would be complexity for a case that does
+not matter here.
+
+Only the BACKLIGHT is switched; LCD power stays up so returning is instant and needs no
+panel re-init (which would flash and cost ~500 ms). Sonos polling is NOT gated on the
+display, so state stays current while dark — that is a precondition for the wake-on-playback
+behaviour above, not an accident.
+
+Perceived brightness is not linear with PWM (roughly the 1/2.2 power), so duty 30 reads as
+about a third of full rather than a seventh. Backlight drivers also have a low cutoff where
+the panel goes black or flickers; if `BACKLIGHT_DIM` is pushed too low that is the driver.
 
 **Inputs are treated differently on purpose:**
 
