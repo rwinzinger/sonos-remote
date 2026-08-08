@@ -60,10 +60,28 @@ bool setRelativeGroupVolume(int adjustment, int &newVolumeOut);
 // rooms are set.
 bool getRoomVolume(const char *room, int &volumeOut);
 
-// Requirement 1: apply the SAME relative change to EVERY distinct group, so the knob works
-// whether the rooms are joined or separate. Returns the number of groups successfully
-// adjusted, and reports the target room's new level in volumeOut when known.
-uint8_t adjustVolumeAllGroups(int adjustment, int &volumeOut);
+// Adjust ONE room's own volume (RenderingControl SetRelativeVolume). Used by Screen 2 when
+// a single room is selected, so the dial moves only that room.
+bool setRelativeRoomVolume(const char *room, int adjustment, int &newVolumeOut);
+
+// Set ONE room to an absolute level. Used by Screen 2's Sync action.
+bool setRoomVolume(const char *room, int volume);
+
+// Requirement 1: apply the SAME relative change to EVERY room, so the knob works whether
+// the rooms are joined or separate AND absolute differences between rooms are preserved.
+//
+// Deliberately per-ROOM, not SetRelativeGroupVolume. Sonos remembers a group's internal
+// volume BALANCE separately from the members' actual levels: setting one member directly
+// (as Sync does) does not update that balance, so the next group-relative call re-imposes
+// the OLD ratio and silently undoes the sync. Measured: after syncing both rooms to 18, a
+// single group +2 produced Main 18 / Stereo 22 — Main did not move at all.
+//
+// Per-room SetRelativeVolume never consults that stored balance, so equal stays equal and
+// any intentional offset is preserved exactly.
+//
+// Returns how many rooms were adjusted; volumeOut receives the mean of their new levels
+// (which equals the Sonos group volume when the rooms are grouped).
+uint8_t adjustVolumeAllRooms(int adjustment, int &volumeOut);
 
 // --- grouping (requirement 3) ----------------------------------------------------------
 // Join `room` into `targetRoom`'s group.

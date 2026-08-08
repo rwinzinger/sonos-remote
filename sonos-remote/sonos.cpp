@@ -434,36 +434,63 @@ bool getRoomVolume(const char *room, int &volumeOut) {
   return true;
 }
 
-uint8_t adjustVolumeAllGroups(int adjustment, int &volumeOut) {
-  String params = "<Adjustment>" + String(adjustment) + "</Adjustment>";
-  String doneCoords[MAX_ZONES];
-  uint8_t doneCount = 0;
-  uint8_t okCount = 0;
+bool setRelativeRoomVolume(const char *room, int adjustment, int &newVolumeOut) {
+  const Zone *z = zoneByRoom(room);
+  if (!z) return false;
+  String params = "<Channel>Master</Channel><Adjustment>" + String(adjustment) +
+                  "</Adjustment>";
+  String resp = soapCall(z->ip, PATH_RENDERING, SVC_RENDERING, "SetRelativeVolume", params);
+  if (resp.isEmpty()) return false;
+  String v = between(resp, "<NewVolume>", "</NewVolume>");
+  if (v.isEmpty()) return false;
+  newVolumeOut = v.toInt();
+  return true;
+}
+
+bool setRoomVolume(const char *room, int volume) {
+  const Zone *z = zoneByRoom(room);
+  if (!z) return false;
+  if (volume < 0) volume = 0;
+  if (volume > 100) volume = 100;
+  // A bonded stereo pair is one zone: setting the visible member sets both speakers.
+  String params = "<Channel>Master</Channel><DesiredVolume>" + String(volume) +
+                  "</DesiredVolume>";
+  return !soapCall(z->ip, PATH_RENDERING, SVC_RENDERING, "SetVolume", params).isEmpty();
+}
+
+uint8_t adjustVolumeAllRooms(int adjustment, int &volumeOut) {
+  uint8_t adjusted = 0;
+  int sum = 0;
 
   for (uint8_t i = 0; i < zoneCount_; i++) {
     const Zone &z = zones_[i];
+    // Bonded satellites follow their pair coordinator: adjusting them separately would
+    // double-apply and break the stereo pair's balance.
     if (z.invisible) continue;
 
-    // One call per distinct GROUP, not per speaker.
+    // One call per ROOM. Guard against a duplicate visible entry for the same room.
     bool already = false;
-    for (uint8_t d = 0; d < doneCount; d++) {
-      if (doneCoords[d] == z.groupCoordUuid) { already = true; break; }
+    for (uint8_t j = 0; j < i; j++) {
+      if (!zones_[j].invisible && zones_[j].room.equalsIgnoreCase(zones_[i].room)) {
+        already = true;
+        break;
+      }
     }
     if (already) continue;
-    if (doneCount < MAX_ZONES) doneCoords[doneCount++] = z.groupCoordUuid;
 
-    const Zone *coord = zoneByUuid(z.groupCoordUuid);
-    if (!coord) continue;
-
-    String resp = soapCall(coord->ip, PATH_GROUP_RENDERING, SVC_GROUP_RENDERING,
-                           "SetRelativeGroupVolume", params);
+    String params = "<Channel>Master</Channel><Adjustment>" + String(adjustment) +
+                    "</Adjustment>";
+    String resp = soapCall(z.ip, PATH_RENDERING, SVC_RENDERING, "SetRelativeVolume", params);
     if (resp.isEmpty()) continue;
-    okCount++;
 
     String v = between(resp, "<NewVolume>", "</NewVolume>");
-    if (!v.isEmpty() && coord->ip == coordinatorIp_) volumeOut = v.toInt();
+    if (v.isEmpty()) continue;
+    sum += v.toInt();
+    adjusted++;
   }
-  return okCount;
+
+  if (adjusted) volumeOut = sum / adjusted;
+  return adjusted;
 }
 
 // ---------------------------------------------------------------------------- grouping

@@ -44,6 +44,8 @@ static const uint32_t WIFI_TIMEOUT_MS    = 20000;
 int      lastStateA   = 0;
 int      pendingSteps = 0;
 int      currentVolume = -1;
+int      uiMainVol    = -1;   // UI-thread mirrors, for the optimistic echo
+int      uiStereoVol  = -1;
 uint32_t lastFlushMs  = 0;
 uint32_t lastPollMs   = 0;
 uint32_t lastStateMs  = 0;
@@ -55,12 +57,17 @@ uint8_t  lastSW       = HIGH;
 // must never block on the network: while it waits, the encoder is not polled (detents are
 // silently lost) and lv_timer_handler() does not run (frozen screen, ignored taps). That
 // was the cause of the sluggishness.
-enum class Cmd : uint8_t { VolumeDelta, ToggleMain, ToggleStereo, LineIn, RefreshState };
+enum class Cmd : uint8_t { VolumeDelta, RoomVolumeDelta, SyncStereoToMain,
+                           ToggleMain, ToggleStereo, LineIn, RefreshState };
+
+// Which room a RoomVolumeDelta targets.
+enum class Room : uint8_t { None, Main, Stereo };
 
 struct Job {
   Cmd cmd;
   int arg;
   bool user;    // true only for deliberate user actions -> drives the busy ring
+  Room room;    // for RoomVolumeDelta
 };
 
 QueueHandle_t jobQueue = nullptr;
@@ -86,7 +93,7 @@ volatile int  shUserJobs    = 0;
 enum StatusCode : int {
   ST_NONE = 0, ST_CONNECTING, ST_FINDING, ST_READY, ST_NO_SONOS,
   ST_WORKING, ST_GROUPING, ST_DETACHING, ST_LINEIN_OK, ST_FAILED, ST_WIFI_FAILED,
-  ST_TARGET_GONE
+  ST_TARGET_GONE, ST_SYNCED
 };
 
 RTC_DATA_ATTR static uint32_t bootCount = 0;
@@ -163,7 +170,8 @@ void resolveAndReport() {
 
 // Forward declarations — the worker task and its queue are defined further down, but the
 // encoder path above needs to enqueue into them.
-void enqueue(Cmd cmd, int arg);
+void enqueue(Cmd cmd, int arg, Room room);
+void enqueueUser(Cmd cmd);
 void workerRefreshState();
 
 // ----------------------------------------------------------------------------- encoder
@@ -177,10 +185,17 @@ void pollEncoder() {
   int dir = (stateB == stateA) ? 1 : -1;
   pendingSteps += dir;
 
-  // Optimistic echo: show the new number on THIS frame. The knob must feel instant even
-  // though the speaker confirmation is one HTTP round-trip away; the worker reconciles
-  // with the real value when it answers.
-  if (currentVolume >= 0) {
+  // Optimistic echo on THIS frame; the worker reconciles with the real value later.
+  // With a room selected on screen 2, the dial moves only that room, so echo THAT number
+  // instead of the group figure.
+  ui::Selection sel = ui::selection();
+  if (sel == ui::Selection::Main && uiMainVol >= 0) {
+    uiMainVol = constrain(uiMainVol + dir * VOLUME_STEP, 0, 100);
+    ui::setRoomVolumes(uiMainVol, uiStereoVol);
+  } else if (sel == ui::Selection::Stereo && uiStereoVol >= 0) {
+    uiStereoVol = constrain(uiStereoVol + dir * VOLUME_STEP, 0, 100);
+    ui::setRoomVolumes(uiMainVol, uiStereoVol);
+  } else if (currentVolume >= 0) {
     currentVolume = constrain(currentVolume + dir * VOLUME_STEP, 0, 100);
     ui::setVolume(currentVolume);
   }
@@ -195,7 +210,14 @@ void flushVolume() {
   lastFlushMs = millis();
 
 #if SONOS_ALLOW_VOLUME_WRITES
-  enqueue(Cmd::VolumeDelta, steps * VOLUME_STEP);
+  switch (ui::selection()) {
+    case ui::Selection::Main:
+      enqueue(Cmd::RoomVolumeDelta, steps * VOLUME_STEP, Room::Main);   break;
+    case ui::Selection::Stereo:
+      enqueue(Cmd::RoomVolumeDelta, steps * VOLUME_STEP, Room::Stereo); break;
+    default:
+      enqueue(Cmd::VolumeDelta, steps * VOLUME_STEP, Room::None);       break;
+  }
 #else
   Serial.printf("[vol] DRY RUN: would send %+d\n", steps * VOLUME_STEP);
 #endif
@@ -279,8 +301,8 @@ void workerTask(void *) {
         }
 
         int vol = shVolume;
-        uint8_t groups = sonos::adjustVolumeAllGroups(job.arg, vol);
-        if (groups > 0) {
+        uint8_t rooms = sonos::adjustVolumeAllRooms(job.arg, vol);
+        if (rooms > 0) {
           shVolume = vol;
           // Bump the sequence so the UI reconciles the optimistic echo right away. Without
           // this, a capped fast spin would leave the screen showing a number that outran
@@ -291,7 +313,43 @@ void workerTask(void *) {
           shStatusCode = ST_FAILED;
           sonos::refreshTopology();
         }
-        Serial.printf("[vol] %+d -> %d (%u groups)\n", job.arg, vol, groups);
+        Serial.printf("[vol] %+d -> %d (%u rooms)\n", job.arg, vol, rooms);
+        break;
+      }
+      case Cmd::RoomVolumeDelta: {
+        if (job.arg == 0) break;
+        if (job.arg > MAX_ADJUST_PER_FLUSH || job.arg < -MAX_ADJUST_PER_FLUSH) {
+          job.arg = job.arg > 0 ? MAX_ADJUST_PER_FLUSH : -MAX_ADJUST_PER_FLUSH;
+        }
+        const char *room = (job.room == Room::Main) ? ROOM_MAIN : ROOM_STEREO;
+        int nv = 0;
+        if (sonos::setRelativeRoomVolume(room, job.arg, nv)) {
+          if (job.room == Room::Main) shMainVol = nv; else shStereoVol = nv;
+          // The GROUP figure is the average across members, so changing one room moves it
+          // too — re-read rather than trying to predict it.
+          int gv = shVolume;
+          if (sonos::getGroupVolume(gv)) shVolume = gv;
+          shStateSeq = shStateSeq + 1;
+          Serial.printf("[vol] %s %+d -> %d\n", room, job.arg, nv);
+        } else {
+          shStatusCode = ST_FAILED;
+          Serial.printf("[vol] %s %+d FAILED\n", room, job.arg);
+        }
+        break;
+      }
+      case Cmd::SyncStereoToMain: {
+        shStatusCode = ST_WORKING;
+        int mainVol = -1;
+        if (!sonos::getRoomVolume(ROOM_MAIN, mainVol)) {
+          shStatusCode = ST_FAILED;
+          Serial.println("[sync] could not read Main's volume");
+          break;
+        }
+        bool ok = sonos::setRoomVolume(ROOM_STEREO, mainVol);
+        Serial.printf("[sync] Stereo := Main (%d): %s\n", mainVol, ok ? "ok" : "FAILED");
+        vTaskDelay(pdMS_TO_TICKS(250));
+        workerRefreshState();
+        shStatusCode = ok ? ST_SYNCED : ST_FAILED;
         break;
       }
       case Cmd::ToggleMain: {
@@ -338,9 +396,9 @@ void workerTask(void *) {
   }
 }
 
-void enqueue(Cmd cmd, int arg) {
+void enqueue(Cmd cmd, int arg, Room room = Room::None) {
   if (!jobQueue) return;
-  Job job{cmd, arg, false};
+  Job job{cmd, arg, false, room};
   // Non-blocking on purpose: dropping a redundant refresh beats stalling the UI thread.
   xQueueSend(jobQueue, &job, 0);
 }
@@ -348,10 +406,46 @@ void enqueue(Cmd cmd, int arg) {
 // A deliberate user action: shows the busy ring until the worker finishes it.
 void enqueueUser(Cmd cmd) {
   if (!jobQueue) return;
-  Job job{cmd, 0, true};
+  Job job{cmd, 0, true, Room::None};
   shUserJobs = shUserJobs + 1;
   if (xQueueSend(jobQueue, &job, 0) != pdTRUE) {
     shUserJobs = shUserJobs - 1;      // never leave the ring spinning forever
+  }
+}
+
+// Screen 2. Selection is mutually exclusive and toggles off when the same room is tapped
+// again, so the dial always has one unambiguous target.
+void onUiAction(ui::Action a) {
+  switch (a) {
+    case ui::Action::Sync:
+      if (!shHaveCoord) { shStatusCode = ST_NO_SONOS; return; }
+      ui::setBusy(true);
+      shStatusCode = ST_WORKING;
+      enqueueUser(Cmd::SyncStereoToMain);
+      break;
+    case ui::Action::SelectMain:
+      ui::setSelection(ui::selection() == ui::Selection::Main ? ui::Selection::None
+                                                             : ui::Selection::Main);
+      Serial.printf("[ui] selection -> %s\n",
+                    ui::selection() == ui::Selection::Main ? "Main" : "none");
+      break;
+    case ui::Action::SelectStereo:
+      ui::setSelection(ui::selection() == ui::Selection::Stereo ? ui::Selection::None
+                                                               : ui::Selection::Stereo);
+      Serial.printf("[ui] selection -> %s\n",
+                    ui::selection() == ui::Selection::Stereo ? "Stereo" : "none");
+      break;
+  }
+}
+
+// Leaving screen 2 clears the selection. Otherwise the dial would silently stay in
+// single-room mode while screen 1 gives no hint that it is — a hidden mode is worse than
+// an extra tap.
+void onScreenChange(ui::Screen s) {
+  Serial.printf("[ui] screen -> %s\n", s == ui::Screen::Home ? "home" : "volume");
+  if (s == ui::Screen::Home && ui::selection() != ui::Selection::None) {
+    ui::setSelection(ui::Selection::None);
+    Serial.println("[ui] selection cleared (left volume screen)");
   }
 }
 
@@ -424,7 +518,7 @@ void setup() {
   if (!panel::begin()) {
     Serial.println("[boot] panel::begin reported a problem — continuing headless");
   }
-  ui::build(onUiTap);
+  ui::build(onUiTap, onUiAction, onScreenChange);
   panel::loop();
 
   pinMode(ENCODER_A_PIN, INPUT);     // external 10K pull-ups on both lines
@@ -458,6 +552,7 @@ const char *statusText(int code) {
     case ST_FAILED:      return "failed";
     case ST_WIFI_FAILED: return "wifi failed";
     case ST_TARGET_GONE: return "Main offline";
+    case ST_SYNCED:      return "synced";
     // Idle shows the SONOS logo alone — no room name. Anything transient appears beneath
     // it and then expires back to this.
     case ST_READY:       return "";
@@ -489,7 +584,9 @@ void syncUiFromWorker() {
       currentVolume = shVolume;      // reconcile the optimistic echo with reality
       ui::setVolume(currentVolume);
     }
-    ui::setRoomVolumes(shMainVol, shStereoVol);
+    uiMainVol   = shMainVol;
+    uiStereoVol = shStereoVol;
+    ui::setRoomVolumes(uiMainVol, uiStereoVol);
   }
 
   if (shStatusCode != lastStatus) {

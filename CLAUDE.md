@@ -371,6 +371,50 @@ Rules the firmware now follows — do not regress these:
 5. **Expect `HTTP -1` in the log** for calls aimed at an offline player. It is handled, not
    a bug — but it is the signal that a speaker is down.
 
+## Volume: use PER-ROOM relative calls, never SetRelativeGroupVolume
+
+**Sonos stores a group's internal volume BALANCE separately from the members' actual
+levels.** `SetVolume` on one member changes that member but does NOT update the stored
+balance, so the next `SetRelativeGroupVolume` recomputes members as
+*target average x stored ratio* and re-imposes the OLD imbalance.
+
+Measured on this system:
+
+```
+Sync sets both rooms to 18/18        <- correct
+one group +2  ->  Main 18 / Stereo 22 <- Main did not move; old 18/22 ratio restored
+```
+
+One detent after a sync undid the sync completely. Note this hides itself well: group
+adjustments DO preserve an existing spread exactly (verified over 8 adjustments holding -4),
+so it reads as slow drift rather than an instant snap-back.
+
+**Therefore `adjustVolumeAllRooms()` sends the same relative delta to EACH ROOM via
+`RenderingControl SetRelativeVolume`.** That path never consults the stored balance:
+equal stays equal, and a deliberate offset is preserved by plain arithmetic. Verified over
+five up/down adjustments holding `spread=0`. It also makes grouped and split behave
+identically — one rule instead of two.
+
+Costs one call per room rather than one per group (skip `Invisible="1"` satellites, or a
+bonded pair gets double-adjusted). Consequence accepted deliberately: the knob no longer
+matches the Sonos app's group slider, which still uses the proportional model — so dragging
+that slider can reassert the app's balance.
+
+## Screen 2 — per-room volume
+
+Swipe LEFT for Screen 2, RIGHT to return. Layout mirrors Screen 1 with `Sync`
+(`LV_SYMBOL_REFRESH`) at 12 o'clock; centre reads `VOLUME` instead of `SONOS` so the screens
+are distinguishable.
+
+- Tapping Main/Stereo SELECTS a room: light-red border (3->5 px) and its number in the
+  breakdown recoloured via LVGL `#RRGGBB text#` markup. The dial then drives only that room.
+- Selection is **mutually exclusive**, and **cleared when leaving Screen 2** — a dial silently
+  stuck in single-room mode while Screen 1 shows no hint of it is worse than an extra tap.
+- Red is border-only: the face still shows blue on/off state, so "selected for editing" and
+  "speaker is on" stay separable.
+- Buttons need `LV_OBJ_FLAG_GESTURE_BUBBLE`, or a swipe starting on one is swallowed.
+- `Sync` sets Stereo to Main's level. After the change above it now STICKS.
+
 ## Threading — the rule that keeps the UI responsive
 
 **NEVER make a Sonos HTTP call from the Arduino `loop()`.** While it blocks, `pollEncoder()`
