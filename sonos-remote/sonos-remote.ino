@@ -39,6 +39,9 @@ static const uint32_t STATUS_HOLD_MS     = 2500;  // transient status messages e
 static const int      MAX_ADJUST_PER_FLUSH = 6;
 static const uint32_t BUTTON_DEBOUNCE_MS = 50;
 static const uint32_t WIFI_TIMEOUT_MS    = 20000;
+// Blank the display after this long without any interaction. Only the backlight goes off,
+// so waking is instant; Sonos polling continues so the state is current the moment it lights.
+static const uint32_t DISPLAY_SLEEP_MS   = 120000;
 
 // --- state ----------------------------------------------------------------------------
 int      lastStateA   = 0;
@@ -51,6 +54,7 @@ uint32_t lastPollMs   = 0;
 uint32_t lastStateMs  = 0;
 uint32_t lastButtonMs = 0;
 uint8_t  lastSW       = HIGH;
+uint32_t lastActivityMs = 0;
 
 // --- worker task ------------------------------------------------------------------------
 // EVERY Sonos HTTP call happens on this task, pinned to core 0. The Arduino loop (core 1)
@@ -173,6 +177,19 @@ void resolveAndReport() {
   }
 }
 
+// Any interaction wakes the screen and restarts the idle countdown.
+//
+// The knob is treated differently from taps on purpose: a turn ALWAYS adjusts the volume,
+// even from a dark screen, because that is the whole point of a physical knob. A touch or a
+// dial press only WAKES when the display is off — those trigger grouping and stereo-pair
+// changes, which must never happen from a blind press.
+bool noteActivity() {
+  lastActivityMs = millis();
+  if (panel::displayOn()) return false;
+  panel::setDisplayOn(true);
+  return true;                        // display was asleep: this input was consumed
+}
+
 // Forward declarations — the worker task and its queue are defined further down, but the
 // encoder path above needs to enqueue into them.
 void enqueue(Cmd cmd, int arg, Room room);
@@ -188,6 +205,7 @@ void pollEncoder() {
   int stateB = digitalRead(ENCODER_B_PIN);
   lastStateA = stateA;
   int dir = (stateB == stateA) ? 1 : -1;
+  noteActivity();                     // wakes, and the turn still counts
   pendingSteps += dir;
 
   // Optimistic echo on THIS frame; the worker reconciles with the real value later.
@@ -629,6 +647,11 @@ void pollButton() {
 
   if (sw == LOW && lastSW == HIGH && (now - lastButtonMs) > BUTTON_DEBOUNCE_MS) {
     lastButtonMs = now;
+    if (noteActivity()) {
+      Serial.println("[btn] dial press woke the display (no action)");
+      lastSW = sw;
+      return;
+    }
     Serial.println("[btn] dial press -> toggle Stereo");
     if (shHaveCoord) {
       ui::setBusy(true);
@@ -683,6 +706,7 @@ void setup() {
 
   lastPollMs = millis();
   lastStateMs = millis();
+  lastActivityMs = millis();
 }
 
 const char *statusText(int code) {
@@ -768,8 +792,18 @@ void loop() {
   pollEncoder();      // latency-critical: must run far more often than anything else
   flushVolume();
   pollButton();
+
+  // Touches are reported by the panel even while dark; the wake-up tap is swallowed there
+  // rather than reaching LVGL, so it cannot press a button by accident.
+  if (panel::consumeTouchActivity()) noteActivity();
+
   syncUiFromWorker();
   panel::loop();
+
+  if (panel::displayOn() && (millis() - lastActivityMs) >= DISPLAY_SLEEP_MS) {
+    Serial.println("[ui] idle — display off");
+    panel::setDisplayOn(false);
+  }
 
   // Both timers only ENQUEUE — no network call ever runs on this thread.
   //

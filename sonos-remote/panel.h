@@ -32,4 +32,15 @@ bool touchOk();
 
 void setBacklight(uint8_t duty);   // 0-255
 
+// --- idle blanking --------------------------------------------------------------------
+// Turning the display off is just the backlight: LCD power stays up, so waking is instant
+// and needs no panel re-init (which would flash and take ~500 ms).
+void setDisplayOn(bool on);
+bool displayOn();
+
+// True if the touchscreen was touched since the last call, and clears the flag. Reported
+// even while the display is off — but in that state the touch is NOT forwarded to LVGL, so
+// the tap that wakes the screen cannot also press whatever happens to be under the finger.
+bool consumeTouchActivity();
+
 }  // namespace panel

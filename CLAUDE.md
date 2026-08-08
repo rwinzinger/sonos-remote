@@ -484,6 +484,27 @@ are distinguishable.
 - Buttons need `LV_OBJ_FLAG_GESTURE_BUBBLE`, or a swipe starting on one is swallowed.
 - `Sync` sets Stereo to Main's level. After the change above it now STICKS.
 
+## Idle blanking
+
+The display blanks after `DISPLAY_SLEEP_MS` (2 min) without interaction and wakes on any
+input. Only the BACKLIGHT is switched; LCD power stays up so waking is instant and needs no
+panel re-init (which would flash and cost ~500 ms). Sonos polling continues while dark, so
+the screen shows current state the moment it lights rather than a stale snapshot.
+
+**Inputs are treated differently on purpose:**
+
+| Input while asleep | Behaviour |
+|---|---|
+| knob turn | wakes AND adjusts volume |
+| touch | wakes only — the tap is swallowed |
+| dial press | wakes only — no Stereo toggle |
+
+A volume knob must work in the dark, and volume is trivially reversible. Taps and the dial
+press trigger grouping and stereo-pair changes, so a blind press must not fire one.
+
+**The wake-up tap is swallowed inside `panel`, in the LVGL input driver** — not in the
+sketch. By the time the sketch sees it LVGL has already dispatched the press to a button.
+
 ## Threading — the rule that keeps the UI responsive
 
 **NEVER make a Sonos HTTP call from the Arduino `loop()`.** While it blocks, `pollEncoder()`

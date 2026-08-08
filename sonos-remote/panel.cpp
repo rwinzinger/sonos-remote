@@ -31,6 +31,10 @@ Adafruit_CST8XX tsPanel = Adafruit_CST8XX();
 
 bool expanderOk_ = false;
 bool touchOk_    = false;
+bool displayOn_  = true;
+bool touchSeen_  = false;
+
+const uint8_t BACKLIGHT_DUTY = 204;   // the value Elecrow's demo uses
 
 // ---- VERBATIM from RotaryScreen_2_1.ino: pin mapping and panel timings. Do not edit. ----
 Arduino_ESP32RGBPanel *bus = new Arduino_ESP32RGBPanel(
@@ -67,6 +71,13 @@ void dispFlush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) 
 
 void touchpadRead(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
   if (touchOk_ && tsPanel.touched()) {
+    touchSeen_ = true;
+    if (!displayOn_) {
+      // Swallow the wake-up tap. The buttons do consequential things — splitting a stereo
+      // pair, regrouping rooms — so a blind tap on a dark screen must never trigger one.
+      data->state = LV_INDEV_STATE_REL;
+      return;
+    }
     CST_TS_Point p = tsPanel.getPoint(0);
     data->point.x = p.x;
     data->point.y = p.y - TOUCH_Y_OFFSET;
@@ -158,7 +169,7 @@ bool begin() {
   // Backlight on, then LCD power. Order matters — the demo does exactly this.
   ledcSetup(BL_PWM_CHANNEL, BL_PWM_FREQ, BL_PWM_RES);
   ledcAttachPin(SCREEN_BACKLIGHT_PIN, BL_PWM_CHANNEL);
-  ledcWrite(BL_PWM_CHANNEL, 204);
+  ledcWrite(BL_PWM_CHANNEL, BACKLIGHT_DUTY);
   pcf8574.digitalWrite(P3, LOW);
 
   Serial.println("[panel] ready");
@@ -178,5 +189,30 @@ bool expanderOk() { return expanderOk_; }
 bool touchOk()    { return touchOk_; }
 
 void setBacklight(uint8_t duty) { ledcWrite(BL_PWM_CHANNEL, duty); }
+
+void setDisplayOn(bool on) {
+  if (on == displayOn_) return;
+  displayOn_ = on;
+  if (on) {
+    // Instant on: waking must feel immediate.
+    ledcWrite(BL_PWM_CHANNEL, BACKLIGHT_DUTY);
+  } else {
+    // Short fade out — nothing is waiting on the loop while going idle, and an abrupt
+    // cut is startling in a dark room.
+    for (int duty = BACKLIGHT_DUTY; duty >= 0; duty -= 8) {
+      ledcWrite(BL_PWM_CHANNEL, duty < 0 ? 0 : duty);
+      delay(12);
+    }
+    ledcWrite(BL_PWM_CHANNEL, 0);
+  }
+}
+
+bool displayOn() { return displayOn_; }
+
+bool consumeTouchActivity() {
+  bool seen = touchSeen_;
+  touchSeen_ = false;
+  return seen;
+}
 
 }  // namespace panel
