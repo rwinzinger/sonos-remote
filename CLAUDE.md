@@ -297,6 +297,21 @@ live system on 2026-08-07; the ambiguities were resolved with the user as follow
 centre = SONOS wordmark. Buttons are toggles showing current state. The rotary ALWAYS
 controls volume; turning it shows the current volume (plain digits for now, gauge later).
 
+**Visual treatment (added after the functional safepoint):**
+- **The bezel ring is the volume**, drawn as a 270° arc with a gap at the bottom for the
+  numerals. The busy indicator REUSES the same geometry and colours, so the ring simply
+  starts sweeping instead of a second element appearing. Present on ALL three screens —
+  the old spinner existed only on screen 1, so mode taps gave no feedback.
+- **Page dots** at the bottom; without them the three-screen swipe chain is invisible.
+- **Gradients are short-range and low-contrast on purpose.** 16-bit colour bands visibly
+  over a long ramp. `LV_DITHER_GRADIENT` exists if more range is ever wanted, at a RAM cost.
+- **Button faces stay LIGHT.** A dark glassy treatment looks better in the abstract but
+  erases the near-black Sonos device icons — the same lesson as the white-recolour attempt.
+- **Glow only in `LV_STATE_CHECKED`.** Shadows are LVGL's most expensive draw op; applying
+  one to all six buttons every frame costs real fill rate on a 480x480 RGB panel.
+- **Press feedback uses `transform_width/height`, NOT `transform_zoom`** — in LVGL 8.3 zoom
+  applies to images, the width/height insets work on any object.
+
 **UI conventions established during build — keep these:**
 - **One accent colour** (`ACCENT` / `ACCENT_FILL` in `ui_screen.cpp`, muted violet). Do not
   scatter hex values; active buttons and the busy ring share it.

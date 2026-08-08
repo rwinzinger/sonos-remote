@@ -31,7 +31,14 @@ const uint32_t RING_ACCENT = 0x86C8F5;
 const uint32_t RING_TRACK  = 0x22222A;
 const uint32_t TEXT_BRIGHT = 0xF0F0F5;
 const uint32_t TEXT_DIM    = 0x8A8A95;
-const uint32_t BG          = 0x101014;
+const uint32_t BG          = 0x14141A;   // top of the background gradient
+const uint32_t BG_DEEP     = 0x08080B;   // bottom — subtle depth without visible banding
+
+// Gradient partners, kept CLOSE to their base colour on purpose: at 16-bit colour depth a
+// long gradient bands visibly, so these are short-range and low-contrast.
+const uint32_t IDLE_FILL_2   = 0x8A8A90;
+const uint32_t ACCENT_FILL_2 = 0x63A9DC;
+const uint32_t PRESS_FILL    = 0x7E7E85;
 
 const int RING_SIZE  = 460;
 const int RING_WIDTH = 8;
@@ -41,6 +48,9 @@ struct ScreenWidgets {
   lv_obj_t *screen  = nullptr;
   lv_obj_t *volume  = nullptr;
   lv_obj_t *rooms   = nullptr;
+  lv_obj_t *arc     = nullptr;        // volume as a bezel ring
+  lv_obj_t *spinner = nullptr;        // same geometry, shown instead while busy
+  lv_obj_t *dots[3] = {nullptr, nullptr, nullptr};
 };
 
 ScreenWidgets home_;
@@ -65,7 +75,12 @@ struct SplitOverlay {
 SplitOverlay splitHome_;
 SplitOverlay splitVol_;
 lv_obj_t *lblStatus  = nullptr;
-lv_obj_t *spinner    = nullptr;
+
+// Animates the press feedback. transform_width/height (not transform_zoom): in LVGL 8.3
+// zoom applies to images, while width/height insets work for any object.
+const lv_style_prop_t PRESS_PROPS[] = {LV_STYLE_TRANSFORM_WIDTH, LV_STYLE_TRANSFORM_HEIGHT,
+                                       LV_STYLE_BG_COLOR, LV_STYLE_PROP_INV};
+lv_style_transition_dsc_t pressTransition_;
 
 TapHandler          tapHandler    = nullptr;
 ActionHandler       actionHandler = nullptr;
@@ -166,13 +181,39 @@ lv_obj_t *makeButton(lv_obj_t *parent, const char *text, int dx, int dy,
   lv_obj_align(btn, LV_ALIGN_CENTER, dx, dy);
 
   lv_obj_set_style_radius(btn, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-  lv_obj_set_style_bg_color(btn, lv_color_hex(IDLE_FILL), LV_PART_MAIN);
   lv_obj_set_style_border_width(btn, BORDER_W, LV_PART_MAIN);
   lv_obj_set_style_border_color(btn, lv_color_hex(IDLE_BORDER), LV_PART_MAIN);
+
+  // Slightly translucent, with a short vertical gradient for depth. Faces stay LIGHT: the
+  // Sonos device icons are near-black, so a dark glassy treatment would erase them.
+  lv_obj_set_style_bg_color(btn, lv_color_hex(IDLE_FILL), LV_PART_MAIN);
+  lv_obj_set_style_bg_grad_color(btn, lv_color_hex(IDLE_FILL_2), LV_PART_MAIN);
+  lv_obj_set_style_bg_grad_dir(btn, LV_GRAD_DIR_VER, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(btn, 235, LV_PART_MAIN);
+
   lv_obj_set_style_bg_color(btn, lv_color_hex(ACCENT_FILL),
                             (lv_style_selector_t)LV_PART_MAIN | LV_STATE_CHECKED);
+  lv_obj_set_style_bg_grad_color(btn, lv_color_hex(ACCENT_FILL_2),
+                                 (lv_style_selector_t)LV_PART_MAIN | LV_STATE_CHECKED);
   lv_obj_set_style_border_color(btn, lv_color_hex(ACCENT),
                                 (lv_style_selector_t)LV_PART_MAIN | LV_STATE_CHECKED);
+
+  // Glow ONLY when active. Shadows are LVGL's most expensive draw op, so restricting them
+  // to the one or two lit buttons keeps the cost bounded on a 480x480 panel.
+  lv_obj_set_style_shadow_color(btn, lv_color_hex(ACCENT_FILL),
+                                (lv_style_selector_t)LV_PART_MAIN | LV_STATE_CHECKED);
+  lv_obj_set_style_shadow_width(btn, 22, (lv_style_selector_t)LV_PART_MAIN | LV_STATE_CHECKED);
+  lv_obj_set_style_shadow_opa(btn, 90, (lv_style_selector_t)LV_PART_MAIN | LV_STATE_CHECKED);
+
+  // Touch-down feedback: shrink and darken slightly. Worth more than it sounds — the real
+  // action takes ~0.5 s of network, and this acknowledges the tap immediately.
+  lv_obj_set_style_bg_color(btn, lv_color_hex(PRESS_FILL),
+                            (lv_style_selector_t)LV_PART_MAIN | LV_STATE_PRESSED);
+  lv_obj_set_style_transform_width(btn, -5,
+                                   (lv_style_selector_t)LV_PART_MAIN | LV_STATE_PRESSED);
+  lv_obj_set_style_transform_height(btn, -5,
+                                    (lv_style_selector_t)LV_PART_MAIN | LV_STATE_PRESSED);
+  lv_obj_set_style_transition(btn, &pressTransition_, LV_PART_MAIN);
 
   lv_obj_add_flag(btn, LV_OBJ_FLAG_CHECKABLE);
   lv_obj_add_flag(btn, LV_OBJ_FLAG_GESTURE_BUBBLE);   // let swipes pass through to the screen
@@ -198,6 +239,53 @@ lv_obj_t *makeButton(lv_obj_t *parent, const char *text, int dx, int dy,
   lv_obj_set_style_text_color(lbl, lv_color_hex(BTN_TEXT), LV_PART_MAIN);
   lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 28);
   return btn;
+}
+
+// The bezel ring. A round display should show volume as a ring, not only as digits — and
+// the busy indicator reuses the SAME geometry and colours, so it reads as one ring changing
+// behaviour rather than two competing elements.
+void addBezelRing(ScreenWidgets &w) {
+  w.arc = lv_arc_create(w.screen);
+  lv_obj_set_size(w.arc, RING_SIZE, RING_SIZE);
+  lv_obj_center(w.arc);
+  lv_arc_set_range(w.arc, 0, 100);
+  lv_arc_set_value(w.arc, 0);
+  // Gap at the bottom, gauge style: the numerals live down there.
+  lv_arc_set_bg_angles(w.arc, 135, 45);
+  lv_arc_set_rotation(w.arc, 0);
+  lv_obj_remove_style(w.arc, NULL, LV_PART_KNOB);      // display only, not draggable
+  lv_obj_clear_flag(w.arc, LV_OBJ_FLAG_CLICKABLE);     // must never eat taps or swipes
+  lv_obj_set_style_arc_width(w.arc, RING_WIDTH, LV_PART_MAIN);
+  lv_obj_set_style_arc_width(w.arc, RING_WIDTH, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_color(w.arc, lv_color_hex(RING_TRACK), LV_PART_MAIN);
+  lv_obj_set_style_arc_color(w.arc, lv_color_hex(RING_ACCENT), LV_PART_INDICATOR);
+
+  w.spinner = lv_spinner_create(w.screen, 1100, 70);
+  lv_obj_set_size(w.spinner, RING_SIZE, RING_SIZE);
+  lv_obj_center(w.spinner);
+  lv_obj_set_style_arc_width(w.spinner, RING_WIDTH, LV_PART_MAIN);
+  lv_obj_set_style_arc_width(w.spinner, RING_WIDTH, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_color(w.spinner, lv_color_hex(RING_TRACK), LV_PART_MAIN);
+  lv_obj_set_style_arc_color(w.spinner, lv_color_hex(RING_ACCENT), LV_PART_INDICATOR);
+  lv_obj_clear_flag(w.spinner, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(w.spinner, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Which of the three screens you are on. Without this the swipe chain is invisible.
+void addPageDots(ScreenWidgets &w, int activeIndex) {
+  for (int i = 0; i < 3; i++) {
+    lv_obj_t *d = lv_obj_create(w.screen);
+    lv_obj_set_size(d, 8, 8);
+    lv_obj_align(d, LV_ALIGN_CENTER, (i - 1) * 18, RADIUS + 55);
+    lv_obj_set_style_radius(d, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_border_width(d, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(d, 0, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(d, lv_color_hex(i == activeIndex ? TEXT_BRIGHT : 0x3A3A44),
+                              LV_PART_MAIN);
+    lv_obj_clear_flag(d, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(d, LV_OBJ_FLAG_SCROLLABLE);
+    w.dots[i] = d;
+  }
 }
 
 // Volume readout shared by both screens.
@@ -260,6 +348,8 @@ void showScreen(Screen s) {
 
 void build(TapHandler taps, ActionHandler actions, SceneHandler scenes,
            ScreenChangeHandler onScreenChange) {
+  lv_style_transition_dsc_init(&pressTransition_, PRESS_PROPS, lv_anim_path_ease_out,
+                               120, 0, NULL);
   tapHandler    = taps;
   actionHandler = actions;
   sceneHandler  = scenes;
@@ -268,6 +358,8 @@ void build(TapHandler taps, ActionHandler actions, SceneHandler scenes,
   // ---- Screen 1: home -----------------------------------------------------------------
   home_.screen = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(home_.screen, lv_color_hex(BG), LV_PART_MAIN);
+  lv_obj_set_style_bg_grad_color(home_.screen, lv_color_hex(BG_DEEP), LV_PART_MAIN);
+  lv_obj_set_style_bg_grad_dir(home_.screen, LV_GRAD_DIR_VER, LV_PART_MAIN);
   lv_obj_clear_flag(home_.screen, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_event_cb(home_.screen, onGesture, LV_EVENT_GESTURE, NULL);
 
@@ -278,6 +370,8 @@ void build(TapHandler taps, ActionHandler actions, SceneHandler scenes,
   btnStereoS1 = makeButton(home_.screen, "Stereo", RADIUS, 0, &icon_era100, nullptr,
                            onTapEvent, &tagStereoS1);
   addVolumeReadout(home_);
+  addBezelRing(home_);
+  addPageDots(home_, 0);
   addCentreLabel(home_.screen, "SONOS");
 
   lblStatus = lv_label_create(home_.screen);
@@ -286,19 +380,11 @@ void build(TapHandler taps, ActionHandler actions, SceneHandler scenes,
   lv_obj_set_style_text_color(lblStatus, lv_color_hex(TEXT_DIM), LV_PART_MAIN);
   lv_obj_align(lblStatus, LV_ALIGN_CENTER, 0, 28);
 
-  spinner = lv_spinner_create(home_.screen, 1100, 70);
-  lv_obj_set_size(spinner, RING_SIZE, RING_SIZE);
-  lv_obj_center(spinner);
-  lv_obj_set_style_arc_width(spinner, RING_WIDTH, LV_PART_MAIN);
-  lv_obj_set_style_arc_width(spinner, RING_WIDTH, LV_PART_INDICATOR);
-  lv_obj_set_style_arc_color(spinner, lv_color_hex(RING_TRACK), LV_PART_MAIN);
-  lv_obj_set_style_arc_color(spinner, lv_color_hex(RING_ACCENT), LV_PART_INDICATOR);
-  lv_obj_clear_flag(spinner, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_flag(spinner, LV_OBJ_FLAG_HIDDEN);
-
   // ---- Screen 2: per-room volume ------------------------------------------------------
   vol_.screen = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(vol_.screen, lv_color_hex(BG), LV_PART_MAIN);
+  lv_obj_set_style_bg_grad_color(vol_.screen, lv_color_hex(BG_DEEP), LV_PART_MAIN);
+  lv_obj_set_style_bg_grad_dir(vol_.screen, LV_GRAD_DIR_VER, LV_PART_MAIN);
   lv_obj_clear_flag(vol_.screen, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_event_cb(vol_.screen, onGesture, LV_EVENT_GESTURE, NULL);
 
@@ -315,11 +401,15 @@ void build(TapHandler taps, ActionHandler actions, SceneHandler scenes,
   lv_obj_clear_flag(btnSync, LV_OBJ_FLAG_CHECKABLE);
 
   addVolumeReadout(vol_);
+  addBezelRing(vol_);
+  addPageDots(vol_, 1);
   addCentreLabel(vol_.screen, "VOLUME");
 
   // ---- Screen 3: one-tap modes --------------------------------------------------------
   modes_.screen = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(modes_.screen, lv_color_hex(BG), LV_PART_MAIN);
+  lv_obj_set_style_bg_grad_color(modes_.screen, lv_color_hex(BG_DEEP), LV_PART_MAIN);
+  lv_obj_set_style_bg_grad_dir(modes_.screen, LV_GRAD_DIR_VER, LV_PART_MAIN);
   lv_obj_clear_flag(modes_.screen, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_event_cb(modes_.screen, onGesture, LV_EVENT_GESTURE, NULL);
 
@@ -330,6 +420,8 @@ void build(TapHandler taps, ActionHandler actions, SceneHandler scenes,
   btnTV    = makeButton(modes_.screen, "TV", RADIUS, 0, nullptr, LV_SYMBOL_VIDEO,
                         onSceneEvent, &tagTV);               //  3 o'clock
   addVolumeReadout(modes_);
+  addBezelRing(modes_);
+  addPageDots(modes_, 2);
   addCentreLabel(modes_.screen, "MODES");
 
   attachSplitOverlay(btnStereoS1, splitHome_);
@@ -349,9 +441,13 @@ void setSceneActive(Scene s, bool active) {
 
 void setVolume(int volume) {
   for (ScreenWidgets *w : {&home_, &vol_, &modes_}) {
-    if (!w->volume) continue;
-    if (volume < 0) lv_label_set_text(w->volume, "--");
-    else            lv_label_set_text_fmt(w->volume, "%d", volume);
+    if (w->volume) {
+      if (volume < 0) lv_label_set_text(w->volume, "--");
+      else            lv_label_set_text_fmt(w->volume, "%d", volume);
+    }
+    // Animate the ring so a turn glides instead of stepping. Short enough (120 ms) that a
+    // fast spin still tracks the hand rather than lagging behind it.
+    if (w->arc && volume >= 0) lv_arc_set_value(w->arc, volume);
   }
 }
 
@@ -416,9 +512,18 @@ void setStatus(const char *text) {
 }
 
 void setBusy(bool busy) {
-  if (!spinner) return;
-  if (busy) lv_obj_clear_flag(spinner, LV_OBJ_FLAG_HIDDEN);
-  else      lv_obj_add_flag(spinner, LV_OBJ_FLAG_HIDDEN);
+  // Swap the static volume ring for the sweeping one. Same radius, width and colour, so it
+  // reads as the ring starting to move rather than a second element appearing.
+  for (ScreenWidgets *w : {&home_, &vol_, &modes_}) {
+    if (!w->spinner || !w->arc) continue;
+    if (busy) {
+      lv_obj_add_flag(w->arc, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_clear_flag(w->spinner, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_clear_flag(w->arc, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_add_flag(w->spinner, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
 }
 
 void setSelection(Selection s) {
