@@ -50,6 +50,10 @@ void setSceneActive(Scene s, bool active);             // screen 3 highlight
 // right half blue when the right speaker is playing. A single on/off state cannot describe
 // two independent speakers.
 void setStereoSplit(bool split, bool rightActive);
+// Track/source text for the home screen. It REPLACES the SONOS wordmark while playing;
+// pass "" to restore the wordmark. Long titles scroll.
+void setNowPlaying(const char *text);
+
 void setStatus(const char *text);
 void setBusy(bool busy);
 

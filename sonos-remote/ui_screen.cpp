@@ -51,6 +51,7 @@ struct ScreenWidgets {
   lv_obj_t *arc     = nullptr;        // volume as a bezel ring
   lv_obj_t *spinner = nullptr;        // same geometry, shown instead while busy
   lv_obj_t *dots[3] = {nullptr, nullptr, nullptr};
+  lv_obj_t *nowPlaying = nullptr;
 };
 
 ScreenWidgets home_;
@@ -75,6 +76,7 @@ struct SplitOverlay {
 SplitOverlay splitHome_;
 SplitOverlay splitVol_;
 lv_obj_t *lblStatus  = nullptr;
+
 
 // Animates the press feedback. transform_width/height (not transform_zoom): in LVGL 8.3
 // zoom applies to images, while width/height insets work for any object.
@@ -288,6 +290,21 @@ void addPageDots(ScreenWidgets &w, int activeIndex) {
   }
 }
 
+// Now playing, under the screen's title. Same dim treatment as the per-room volume figures,
+// so it reads as secondary information rather than competing with the wordmark. Width is
+// capped at 180 px because the Main and Stereo buttons close in to +/-95 px; longer titles
+// scroll instead of colliding with them.
+void addNowPlaying(ScreenWidgets &w) {
+  w.nowPlaying = lv_label_create(w.screen);
+  lv_label_set_long_mode(w.nowPlaying, LV_LABEL_LONG_SCROLL_CIRCULAR);
+  lv_obj_set_width(w.nowPlaying, 180);
+  lv_label_set_text(w.nowPlaying, "");
+  lv_obj_set_style_text_font(w.nowPlaying, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_obj_set_style_text_color(w.nowPlaying, lv_color_hex(TEXT_DIM), LV_PART_MAIN);
+  lv_obj_set_style_text_align(w.nowPlaying, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_align(w.nowPlaying, LV_ALIGN_CENTER, 0, 12);
+}
+
 // Volume readout shared by both screens.
 void addVolumeReadout(ScreenWidgets &w) {
   w.volume = lv_label_create(w.screen);
@@ -313,7 +330,9 @@ lv_obj_t *addCentreLabel(lv_obj_t *parent, const char *text) {
   lv_obj_set_style_text_color(lbl, lv_color_hex(TEXT_BRIGHT), LV_PART_MAIN);
   lv_obj_set_style_text_letter_space(lbl, 7, LV_PART_MAIN);
   // +4 optical nudge: all-caps text has no descenders, so true geometric centring reads high.
-  lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 4);
+  // Sits above centre: the now-playing line lives underneath, and the transient status
+  // line under that.
+  lv_obj_align(lbl, LV_ALIGN_CENTER, 0, -16);
   return lbl;
 }
 
@@ -373,12 +392,13 @@ void build(TapHandler taps, ActionHandler actions, SceneHandler scenes,
   addBezelRing(home_);
   addPageDots(home_, 0);
   addCentreLabel(home_.screen, "SONOS");
+  addNowPlaying(home_);
 
   lblStatus = lv_label_create(home_.screen);
   lv_label_set_text(lblStatus, "starting ...");
   lv_obj_set_style_text_font(lblStatus, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_set_style_text_color(lblStatus, lv_color_hex(TEXT_DIM), LV_PART_MAIN);
-  lv_obj_align(lblStatus, LV_ALIGN_CENTER, 0, 28);
+  lv_obj_align(lblStatus, LV_ALIGN_CENTER, 0, 38);
 
   // ---- Screen 2: per-room volume ------------------------------------------------------
   vol_.screen = lv_obj_create(NULL);
@@ -404,6 +424,7 @@ void build(TapHandler taps, ActionHandler actions, SceneHandler scenes,
   addBezelRing(vol_);
   addPageDots(vol_, 1);
   addCentreLabel(vol_.screen, "VOLUME");
+  addNowPlaying(vol_);
 
   // ---- Screen 3: one-tap modes --------------------------------------------------------
   modes_.screen = lv_obj_create(NULL);
@@ -423,6 +444,7 @@ void build(TapHandler taps, ActionHandler actions, SceneHandler scenes,
   addBezelRing(modes_);
   addPageDots(modes_, 2);
   addCentreLabel(modes_.screen, "MODES");
+  addNowPlaying(modes_);
 
   attachSplitOverlay(btnStereoS1, splitHome_);
   attachSplitOverlay(btnStereoS2, splitVol_);
@@ -445,9 +467,20 @@ void setVolume(int volume) {
       if (volume < 0) lv_label_set_text(w->volume, "--");
       else            lv_label_set_text_fmt(w->volume, "%d", volume);
     }
-    // Animate the ring so a turn glides instead of stepping. Short enough (120 ms) that a
-    // fast spin still tracks the hand rather than lagging behind it.
-    if (w->arc && volume >= 0) lv_arc_set_value(w->arc, volume);
+    // Glide rather than step. Any running animation on this arc is deleted first, so a
+    // fast spin re-aims at the newest value instead of queueing a backlog that would keep
+    // moving after the knob stops.
+    if (w->arc && volume >= 0) {
+      lv_anim_del(w->arc, (lv_anim_exec_xcb_t)lv_arc_set_value);
+      lv_anim_t a;
+      lv_anim_init(&a);
+      lv_anim_set_var(&a, w->arc);
+      lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_arc_set_value);
+      lv_anim_set_values(&a, lv_arc_get_value(w->arc), volume);
+      lv_anim_set_time(&a, 120);
+      lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+      lv_anim_start(&a);
+    }
   }
 }
 
@@ -504,6 +537,28 @@ void setStereoSplit(bool split, bool rightActive) {
                               LV_PART_MAIN);
     lv_obj_clear_flag(ov->rightHalf, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(ov->divider, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
+// Empty text simply clears the line; the wordmark stays put on every screen.
+void setNowPlaying(const char *text) {
+  // Trailing gap so the circular scroll has an obvious break instead of the end running
+  // straight into the start. Padding is added HERE rather than in the sonos module: it is
+  // a display concern, and the module should keep returning clean metadata.
+  static char padded[128];
+  if (text && *text) {
+    snprintf(padded, sizeof(padded), "%s        ", text);
+  } else {
+    padded[0] = '\0';
+  }
+
+  for (ScreenWidgets *w : {&home_, &vol_, &modes_}) {
+    if (!w->nowPlaying) continue;
+    // Only re-set when it actually changed: otherwise every refresh restarts the scroll
+    // animation and a long title never gets read to the end.
+    if (strcmp(lv_label_get_text(w->nowPlaying), padded) != 0) {
+      lv_label_set_text(w->nowPlaying, padded);
+    }
   }
 }
 

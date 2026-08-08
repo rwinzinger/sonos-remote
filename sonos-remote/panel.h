@@ -38,6 +38,10 @@ void setBacklight(uint8_t duty);   // 0-255
 void setDisplayOn(bool on);
 bool displayOn();
 
+// Half-step before blanking: dims rather than cutting, which doubles as a warning that the
+// screen is about to sleep. Ignored while the display is fully off.
+void setDimmed(bool dim);
+
 // True if the touchscreen was touched since the last call, and clears the flag. Reported
 // even while the display is off — but in that state the touch is NOT forwarded to LVGL, so
 // the tap that wakes the screen cannot also press whatever happens to be under the finger.

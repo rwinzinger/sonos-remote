@@ -35,6 +35,8 @@ bool displayOn_  = true;
 bool touchSeen_  = false;
 
 const uint8_t BACKLIGHT_DUTY = 204;   // the value Elecrow's demo uses
+const uint8_t BACKLIGHT_DIM  = 40;    // ~20%: clearly still on, clearly about to sleep
+bool dimmed_ = false;
 
 // ---- VERBATIM from RotaryScreen_2_1.ino: pin mapping and panel timings. Do not edit. ----
 Arduino_ESP32RGBPanel *bus = new Arduino_ESP32RGBPanel(
@@ -195,6 +197,7 @@ void setDisplayOn(bool on) {
   displayOn_ = on;
   if (on) {
     // Instant on: waking must feel immediate.
+    dimmed_ = false;
     ledcWrite(BL_PWM_CHANNEL, BACKLIGHT_DUTY);
   } else {
     // Short fade out — nothing is waiting on the loop while going idle, and an abrupt
@@ -208,6 +211,12 @@ void setDisplayOn(bool on) {
 }
 
 bool displayOn() { return displayOn_; }
+
+void setDimmed(bool dim) {
+  if (!displayOn_ || dim == dimmed_) return;
+  dimmed_ = dim;
+  ledcWrite(BL_PWM_CHANNEL, dim ? BACKLIGHT_DIM : BACKLIGHT_DUTY);
+}
 
 bool consumeTouchActivity() {
   bool seen = touchSeen_;

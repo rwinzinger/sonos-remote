@@ -42,6 +42,11 @@ static const uint32_t WIFI_TIMEOUT_MS    = 20000;
 // Blank the display after this long without any interaction. Only the backlight goes off,
 // so waking is instant; Sonos polling continues so the state is current the moment it lights.
 static const uint32_t DISPLAY_SLEEP_MS   = 120000;
+static const uint32_t DISPLAY_DIM_MS     = 110000;  // dim 10 s before blanking, as a warning
+// WiFi is checked periodically because it is NOT self-healing here: connectWiFi() runs once
+// at boot, so before this a router reboot left the device dead until power-cycled.
+static const uint32_t WIFI_CHECK_MS      = 5000;
+static const uint32_t WIFI_RETRY_MS      = 20000;
 
 // --- state ----------------------------------------------------------------------------
 int      lastStateA   = 0;
@@ -55,6 +60,9 @@ uint32_t lastStateMs  = 0;
 uint32_t lastButtonMs = 0;
 uint8_t  lastSW       = HIGH;
 uint32_t lastActivityMs = 0;
+uint32_t lastWifiCheckMs = 0;
+uint32_t lastWifiRetryMs = 0;
+bool     wifiWasUp       = false;
 
 // --- worker task ------------------------------------------------------------------------
 // EVERY Sonos HTTP call happens on this task, pinned to core 0. The Arduino loop (core 1)
@@ -99,10 +107,15 @@ volatile uint32_t shStateSeq = 0;  // bumped whenever the flags above change
 // reads as the device doing something when nobody touched it.
 volatile int  shUserJobs    = 0;
 
+// Now-playing text crosses cores, so it cannot be a String. A short spinlock around the
+// copy avoids a torn read producing garbage on screen.
+portMUX_TYPE npMux = portMUX_INITIALIZER_UNLOCKED;
+char npText[96] = {0};
+
 enum StatusCode : int {
   ST_NONE = 0, ST_CONNECTING, ST_FINDING, ST_READY, ST_NO_SONOS,
   ST_WORKING, ST_GROUPING, ST_DETACHING, ST_LINEIN_OK, ST_FAILED, ST_WIFI_FAILED,
-  ST_TARGET_GONE, ST_SYNCED, ST_TV_READY
+  ST_TARGET_GONE, ST_SYNCED, ST_TV_READY, ST_WIFI_LOST
 };
 
 RTC_DATA_ATTR static uint32_t bootCount = 0;
@@ -132,6 +145,7 @@ bool connectWiFi() {
   Serial.printf("[wifi] connecting to \"%s\" ...\n", WIFI_SSID);
   ui::setStatus("connecting wifi ...");
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);        // let the stack retry on its own as the first line
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 
   uint32_t deadline = millis() + WIFI_TIMEOUT_MS;
@@ -149,6 +163,7 @@ bool connectWiFi() {
   }
   Serial.printf("[wifi] connected: %s (%d dBm)\n",
                 WiFi.localIP().toString().c_str(), WiFi.RSSI());
+  wifiWasUp = true;
   return true;
 }
 
@@ -295,6 +310,13 @@ void workerRefreshState() {
   bool rp = false;
   if (shPairSplit) sonos::isPlayingUuid(sonos::rightSpeakerUuid(), rp);
   shRightPlaying = rp;
+
+  char np[96];
+  if (!sonos::getNowPlaying(ROOM_MAIN, np, sizeof(np))) np[0] = '\0';
+  portENTER_CRITICAL(&npMux);
+  strncpy(npText, np, sizeof(npText) - 1);
+  npText[sizeof(npText) - 1] = '\0';
+  portEXIT_CRITICAL(&npMux);
   shStateSeq     = shStateSeq + 1;
 
   // Say so when the configured room is absent. Silently steering a different group while
@@ -723,6 +745,7 @@ const char *statusText(int code) {
     case ST_TARGET_GONE: return "Main offline";
     case ST_SYNCED:      return "synced";
     case ST_TV_READY:    return "right speaker only";
+    case ST_WIFI_LOST:   return "wifi lost";
     // Idle shows the SONOS logo alone — no room name. Anything transient appears beneath
     // it and then expires back to this.
     case ST_READY:       return "";
@@ -751,6 +774,13 @@ void syncUiFromWorker() {
     ui::setActive(ui::Button::Stereo,  shStereoActive);
     ui::setActive(ui::Button::Vinyl, shLineIn);
     ui::setStereoSplit(shPairSplit, shRightPlaying);
+
+    char np[96];
+    portENTER_CRITICAL(&npMux);
+    strncpy(np, npText, sizeof(np) - 1);
+    np[sizeof(np) - 1] = '\0';
+    portEXIT_CRITICAL(&npMux);
+    ui::setNowPlaying(np);
     // Screen 3: highlight whichever mode the system is actually in, derived from real
     // state rather than remembering which button was last pressed.
     // TV is a configuration; HiFi means joined; Radio means Main alone and playing. A
@@ -799,6 +829,39 @@ void loop() {
 
   syncUiFromWorker();
   panel::loop();
+
+  // WiFi supervision. WiFi.begin() is asynchronous, so retrying here never blocks the UI —
+  // which is the whole reason this can live in loop() at all.
+  if (millis() - lastWifiCheckMs >= WIFI_CHECK_MS) {
+    lastWifiCheckMs = millis();
+    bool up = (WiFi.status() == WL_CONNECTED);
+    if (!up) {
+      if (wifiWasUp) {
+        Serial.println("[wifi] connection lost");
+        wifiWasUp = false;
+        shStatusCode = ST_WIFI_LOST;
+      }
+      if (millis() - lastWifiRetryMs >= WIFI_RETRY_MS) {
+        lastWifiRetryMs = millis();
+        Serial.println("[wifi] retrying ...");
+        WiFi.disconnect();
+        WiFi.begin(WIFI_SSID, WIFI_PASS);
+      }
+    } else if (!wifiWasUp) {
+      wifiWasUp = true;
+      Serial.printf("[wifi] reconnected: %s\n", WiFi.localIP().toString().c_str());
+      shStatusCode = ST_READY;
+      // The topology may have moved while we were away; re-resolve rather than trusting
+      // the cached coordinator.
+      enqueue(Cmd::RefreshState, 0, Room::None);
+    }
+  }
+
+  // Dim as a warning 10 s before blanking.
+  {
+    uint32_t idle = millis() - lastActivityMs;
+    panel::setDimmed(idle >= DISPLAY_DIM_MS);
+  }
 
   if (panel::displayOn() && (millis() - lastActivityMs) >= DISPLAY_SLEEP_MS) {
     Serial.println("[ui] idle — display off");

@@ -297,6 +297,26 @@ live system on 2026-08-07; the ambiguities were resolved with the user as follow
 centre = SONOS wordmark. Buttons are toggles showing current state. The rotary ALWAYS
 controls volume; turning it shows the current volume (plain digits for now, gauge later).
 
+**Now playing** (home/volume/modes, under each screen's title, dimmed like the per-room
+volume figures):
+- **Always ask the group COORDINATOR, never the room.** A follower reports
+  `CurrentURI = x-rincon:<coord>` and carries NO metadata — measured on Main while music was
+  clearly playing. Querying the room directly shows a blank line during playback.
+- Radio stations put "Artist - Title" in `r:streamContent`, not `dc:title`; both are checked.
+- Sources with no track are NAMED rather than blanked: line-in -> "Plattenspieler",
+  Bluetooth, AirPlay (from `CurrentURIMetaData`), or the station title.
+- **ASCII only in UI strings.** LVGL's Montserrat carries ASCII plus a symbol range, so
+  U+00B7, en/em dashes, ellipsis and typographic quotes render as placeholder boxes. The
+  artist separator is a plain " - " for this reason.
+- The label is only re-set when the text CHANGES, or every refresh restarts the scroll
+  animation and a long title never reaches its end. Trailing spaces give the circular scroll
+  a visible break; that padding lives in the UI layer, not in the sonos module.
+
+**WiFi is supervised in `loop()`** — `connectWiFi()` runs once at boot, so before this a
+router reboot left the device dead until power-cycled. `setAutoReconnect(true)` plus a 5 s
+check and a 20 s retry; `WiFi.begin()` is asynchronous, which is what makes retrying safe
+there. On reconnect the topology is re-resolved rather than trusting the cached coordinator.
+
 **Visual treatment (added after the functional safepoint):**
 - **The bezel ring is the volume**, drawn as a 270° arc with a gap at the bottom for the
   numerals. The busy indicator REUSES the same geometry and colours, so the ring simply

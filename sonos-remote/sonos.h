@@ -136,6 +136,14 @@ bool isBluetoothActive(const char *room, bool &activeOut);
 // Transport of a specific zone by UUID. Needed for the split-off RIGHT speaker, which has
 // no reliable room name of its own once the pair is separated.
 bool isPlayingUuid(const char *uuid, bool &playingOut);
+
+// "Now playing" for the room's GROUP, written into `out`.
+//
+// Always asks the group COORDINATOR: a follower reports CurrentURI "x-rincon:<coord>" and
+// carries NO metadata, so querying the room directly returns nothing while music plays.
+// Falls back to naming the source (Plattenspieler / Bluetooth / AirPlay / station) when a
+// source has no track information. Returns false when nothing is playing.
+bool getNowPlaying(const char *room, char *out, size_t outLen);
 bool stopRoom(const char *room);
 bool playUriOn(const char *room, const char *uri);   // e.g. a radio stream
 

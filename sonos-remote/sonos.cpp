@@ -798,6 +798,51 @@ bool isBluetoothActive(const char *room, bool &activeOut) {
   return true;
 }
 
+bool getNowPlaying(const char *room, char *out, size_t outLen) {
+  if (!out || outLen == 0) return false;
+  out[0] = '\0';
+
+  const Zone *z = coordinatorForRoom(room);
+  if (!z) return false;
+
+  String info = soapCall(z->ip, PATH_AVTRANSPORT, SVC_AVTRANSPORT, "GetTransportInfo");
+  String state = between(info, "<CurrentTransportState>", "</CurrentTransportState>");
+  if (state != "PLAYING" && state != "TRANSITIONING") return false;
+
+  String title, artist;
+  String pos = soapCall(z->ip, PATH_AVTRANSPORT, SVC_AVTRANSPORT, "GetPositionInfo");
+  if (!pos.isEmpty()) {
+    String meta = unescapeXml(between(pos, "<TrackMetaData>", "</TrackMetaData>"));
+    title  = between(meta, "<dc:title>", "</dc:title>");
+    artist = between(meta, "<dc:creator>", "</dc:creator>");
+    // Radio streams put "Artist - Title" here instead of in dc:title.
+    String stream = between(meta, "<r:streamContent>", "</r:streamContent>");
+    if (title.isEmpty() && stream.length()) title = stream;
+  }
+
+  if (title.isEmpty()) {
+    // No track info: name the SOURCE instead of showing nothing.
+    String mi  = soapCall(z->ip, PATH_AVTRANSPORT, SVC_AVTRANSPORT, "GetMediaInfo");
+    String uri = between(mi, "<CurrentURI>", "</CurrentURI>");
+    String umeta = unescapeXml(between(mi, "<CurrentURIMetaData>", "</CurrentURIMetaData>"));
+    String label = between(umeta, "<dc:title>", "</dc:title>");
+
+    if (uri.startsWith("x-rincon-stream:"))      title = "Plattenspieler";
+    else if (uri.indexOf("bluetooth") >= 0)      title = "Bluetooth";
+    else if (label.length())                     title = label;
+    else if (uri.startsWith("x-rincon-mp3radio")) title = "Radio";
+  }
+  if (title.isEmpty()) return false;
+
+  String line = title;
+  // ASCII separator on purpose: LVGL's Montserrat build carries ASCII plus a symbol range,
+  // so U+00B7 (middle dot) and en/em dashes render as placeholder boxes.
+  if (artist.length() && !artist.equalsIgnoreCase(title)) line += " - " + artist;
+  strncpy(out, line.c_str(), outLen - 1);
+  out[outLen - 1] = '\0';
+  return true;
+}
+
 bool isPlayingUuid(const char *uuid, bool &playingOut) {
   if (!uuid || !*uuid) return false;
   const Zone *z = zoneByUuid(String(uuid));
