@@ -621,8 +621,6 @@ Done and verified on hardware:
   outrun the speakers until the next 5 s poll.
 
 Still open:
-- `sonos-remote/infos.txt` holds stale commands (old FQBN, `PartitionScheme=default`, and
-  `arduino-cli monitor` piping which does not work) — use CLAUDE.md instead.
 - `sonos-remote/specs.txt` line 24 ("right speaker of Stereo only, via Bluetooth") is now
   DONE — TV mode splits the pair and the Bluetooth path is confirmed. The spec text itself
   still reads as an open wish; update it if the file is ever revised.

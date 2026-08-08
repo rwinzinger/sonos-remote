@@ -1,151 +1,60 @@
-# Kompilieren
-arduino-cli compile --fqbn "esp32:esp32:esp32s3:PSRAM=opi,FlashSize=16M,CDCOnBoot=cdc,PartitionScheme=default" .
+# Spickzettel — verifizierte Befehle für dieses Board
+# (Ausführliche Begründungen stehen in ../CLAUDE.md. Bei Widerspruch gilt CLAUDE.md.)
 
-# Flashen
-arduino-cli upload -p /dev/cu.usbmodem21401 --fqbn "esp32:esp32:esp32s3:PSRAM=opi,FlashSize=16M,CDCOnBoot=cdc,PartitionScheme=default" .
+# --- FQBN ---------------------------------------------------------------------------
+# huge_app statt default: LVGL-Builds passen nicht in die 1,3 MB der Default-Partition.
+# CDCOnBoot=cdc: sonst landet Serial auf UART0 (FPC-Stecker) und man sieht nichts.
+FQBN="esp32:esp32:esp32s3:PSRAM=opi,FlashSize=16M,PartitionScheme=huge_app,CDCOnBoot=cdc"
 
-# Serial-Monitor (der Feedback-Kanal)
-arduino-cli monitor -p /dev/cu.usbmodem21401 -c baudrate=115200
+# ESP32-Core 2.0.17 ist Pflicht — Arduino_GFX 1.3.1 baut nicht gegen Core 3.x.
 
+# --- Port finden --------------------------------------------------------------------
+# Der Portname ändert sich, sobald das Board an einer anderen USB-Buchse hängt
+# (gesehen: usbmodem21401 -> usbmodem21201 -> usbmodem11101). Nie hart eintragen.
+arduino-cli board list
+PORT=$(ls /dev/cu.usbmodem* | head -1)
 
+# --- Kompilieren --------------------------------------------------------------------
+arduino-cli compile --fqbn "$FQBN" .
 
-arduino-cli board list                                                                                      23:42:36
-Port                            Protocol Type              Board Name          FQBN                      Core
-/dev/cu.Bluetooth-Incoming-Port serial   Serial Port       Unknown
-/dev/cu.debug-console           serial   Serial Port       Unknown
-/dev/cu.usbmodem21401           serial   Serial Port (USB) ESP32 Family Device esp32:esp32:esp32_family  esp32:esp32
-                                         Serial Port (USB) Ozobot DRVKit       esp32:esp32:ozobot_drvkit esp32:esp32
+# --- Flashen ------------------------------------------------------------------------
+# ACHTUNG: "arduino-cli upload" scheitert auf diesem Board am Flasher-Stub
+# ("No serial data received" / "Unable to verify flash chip connection").
+# Zuverlässig ist esptool mit --no-stub bei 115200:
+BD=$(ls -td ~/Library/Caches/arduino/sketches/*/ | xargs -I{} sh -c 'test -f "{}sonos-remote.ino.bin" && echo {}' | head -1)
+BOOT_APP0=~/Library/Arduino15/packages/esp32/hardware/esp32/2.0.17/tools/partitions/boot_app0.bin
+ESPTOOL=~/Library/Arduino15/packages/esp32/tools/esptool_py/4.5.1/esptool
 
+"$ESPTOOL" --chip esp32s3 --port "$PORT" --baud 115200 --no-stub \
+  --before default_reset --after hard_reset \
+  write_flash -z --flash_mode keep --flash_freq keep --flash_size keep \
+  0x0     "$BD/sonos-remote.ino.bootloader.bin" \
+  0x8000  "$BD/sonos-remote.ino.partitions.bin" \
+  0xe000  "$BOOT_APP0" \
+  0x10000 "$BD/sonos-remote.ino.bin"
 
+# --flash_mode/freq/size "keep" ist wichtig: erzwingt man dio statt des gebauten qio,
+# bootet das Board mit OPI-PSRAM nicht mehr.
 
+# --- Serial lesen -------------------------------------------------------------------
+# "arduino-cli monitor" liefert NICHTS, wenn seine Ausgabe in eine Pipe/Datei geht —
+# es puffert, und beim Abbrechen ist der Puffer weg. Stattdessen:
+stty -f "$PORT" 115200 raw -echo clocal
+timeout 30 cat "$PORT" > /tmp/serial.log ; cat /tmp/serial.log
 
+# Das Öffnen von /dev/cu.* löst KEINEN Reset aus. Was nur einmal in setup() gedruckt
+# wird, verpasst man dadurch fast immer — deshalb loggt die Firmware zyklisch.
 
-arduino-cli board details -b esp32:esp32:esp32s3                                                         4s 23:17:33
-Board name:            ESP32S3 Dev Module
-FQBN:                  esp32:esp32:esp32s3
-Board version:         3.3.11
+# --- Reset ohne neu zu flashen ------------------------------------------------------
+"$ESPTOOL" --port "$PORT" --no-stub --after hard-reset read-mac
+# Dabei darf kein "cat" auf dem Port hängen, sonst passiert der Reset nicht.
 
-Package name:          esp32
-Package maintainer:    Espressif Systems
-Package URL:           https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
-Package website:       https://github.com/espressif/arduino-esp32
-Package online help:   https://esp32.com
+# --- Sonderfall Display-Demo --------------------------------------------------------
+# diagnostics/display_baseline linkt ~6,4 MB (40 MB Bilder in der UI-Library) und passt
+# in KEIN Standard-Schema. Dafür liegt dort eine eigene partitions.csv (10 MB App).
+# Zusätzlich nötig, weil die Größenprüfung sonst abbricht:
+#   arduino-cli compile --fqbn "$FQBN" --build-property upload.maximum_size=10485760 .
 
-Platform name:         esp32
-Platform category:     ESP32
-Platform architecture: esp32
-Platform URL:          https://github.com/espressif/arduino-esp32/releases/download/3.3.11/esp32-core-3.3.11.zip
-Platform file name:    esp32-core-3.3.11.zip
-Platform size (bytes): 46900611
-Platform checksum:     SHA-256:a18203f2429f5551ec929b80e8129e439df7a3a009b536b305f00b4a1f1bbb62
-
-Required tool: arduino:dfu-util                               0.11.0-arduino5
-Required tool: esp32:esp-rv32                                 2601
-Required tool: esp32:esp-x32                                  2601
-Required tool: esp32:esp32-libs                               3.3.11
-Required tool: esp32:esp32c3-libs                             3.3.11
-Required tool: esp32:esp32c5-libs                             3.3.11
-Required tool: esp32:esp32c6-libs                             3.3.11
-Required tool: esp32:esp32h2-libs                             3.3.11
-Required tool: esp32:esp32p4-libs                             3.3.11
-Required tool: esp32:esp32p4_es-libs                          3.3.11
-Required tool: esp32:esp32s2-libs                             3.3.11
-Required tool: esp32:esp32s3-libs                             3.3.11
-Required tool: esp32:esptool_py                               5.3.1
-Required tool: esp32:mklittlefs                               4.0.2-db0513a
-Required tool: esp32:mkspiffs                                 0.2.3
-Required tool: esp32:openocd-esp32                            v0.12.0-esp32-20260424
-Required tool: esp32:riscv32-esp-elf-gdb                      17.1_20260402
-Required tool: esp32:xtensa-esp-elf-gdb                       17.1_20260402
-
-Option:        Upload Speed                                                          UploadSpeed
-               921600                                         ✔                      UploadSpeed=921600
-               115200                                                                UploadSpeed=115200
-               230400                                                                UploadSpeed=230400
-               460800                                                                UploadSpeed=460800
-Option:        USB Mode                                                              USBMode
-               Hardware CDC and JTAG                          ✔                      USBMode=hwcdc
-               USB-OTG (TinyUSB)                                                     USBMode=default
-Option:        USB CDC On Boot                                                       CDCOnBoot
-               Disabled                                       ✔                      CDCOnBoot=default
-               Enabled                                                               CDCOnBoot=cdc
-Option:        USB Firmware MSC On Boot                                              MSCOnBoot
-               Disabled                                       ✔                      MSCOnBoot=default
-               Enabled (Requires USB-OTG Mode)                                       MSCOnBoot=msc
-Option:        USB DFU On Boot                                                       DFUOnBoot
-               Disabled                                       ✔                      DFUOnBoot=default
-               Enabled (Requires USB-OTG Mode)                                       DFUOnBoot=dfu
-Option:        Upload Mode                                                           UploadMode
-               UART0 / Hardware CDC                           ✔                      UploadMode=default
-               USB-OTG CDC (TinyUSB)                                                 UploadMode=cdc
-Option:        CPU Frequency                                                         CPUFreq
-               240MHz (WiFi)                                  ✔                      CPUFreq=240
-               160MHz (WiFi)                                                         CPUFreq=160
-               80MHz (WiFi)                                                          CPUFreq=80
-               40MHz                                                                 CPUFreq=40
-               20MHz                                                                 CPUFreq=20
-               10MHz                                                                 CPUFreq=10
-Option:        Flash Mode                                                            FlashMode
-               QIO 80MHz                                      ✔                      FlashMode=qio
-               QIO 120MHz                                                            FlashMode=qio120
-               DIO 80MHz                                                             FlashMode=dio
-               OPI 80MHz                                                             FlashMode=opi
-Option:        Flash Size                                                            FlashSize
-               4MB (32Mb)                                     ✔                      FlashSize=4M
-               8MB (64Mb)                                                            FlashSize=8M
-               16MB (128Mb)                                                          FlashSize=16M
-               32MB (256Mb)                                                          FlashSize=32M
-Option:        Partition Scheme                                                      PartitionScheme
-               Default 4MB with spiffs (1.2MB APP/1.5MB SPIFFS) ✔                      PartitionScheme=default
-               Default 4MB with ffat (1.2MB APP/1.5MB FATFS)                         PartitionScheme=defaultffat
-               8M with spiffs (3MB APP/1.5MB SPIFFS)                                 PartitionScheme=default_8MB
-               Minimal (1.3MB APP/700KB SPIFFS)                                      PartitionScheme=minimal
-               No FS 4MB (2MB APP x2)                                                PartitionScheme=no_fs
-               No OTA (2MB APP/2MB SPIFFS)                                           PartitionScheme=no_ota
-               No OTA (1MB APP/3MB SPIFFS)                                           PartitionScheme=noota_3g
-               No OTA (2MB APP/2MB FATFS)                                            PartitionScheme=noota_ffat
-               No OTA (1MB APP/3MB FATFS)                                            PartitionScheme=noota_3gffat
-               Huge APP (3MB No OTA/1MB SPIFFS)                                      PartitionScheme=huge_app
-               Minimal SPIFFS (1.9MB APP with OTA/128KB SPIFFS)                        PartitionScheme=min_spiffs
-               16M Flash (2MB APP/12.5MB FATFS)                                      PartitionScheme=fatflash
-               16M Flash (3MB APP/9.9MB FATFS)                                       PartitionScheme=app3M_fat9M_16MB
-               RainMaker 4MB                                                         PartitionScheme=rainmaker
-               RainMaker 4MB No OTA                                                  PartitionScheme=rainmaker_4MB
-               RainMaker 8MB                                                         PartitionScheme=rainmaker_8MB
-               32M Flash (4.8MB APP/22MB FATFS)                                      PartitionScheme=app5M_fat24M_32MB
-               32M Flash (4.8MB APP/22MB LittleFS)                                   PartitionScheme=app5M_little24M_32MB
-               32M Flash (13MB APP/6.75MB SPIFFS)                                    PartitionScheme=app13M_data7M_32MB
-               ESP SR 16M (3MB APP/6MB SPIFFS/3.9MB MODEL)                           PartitionScheme=esp_sr_16
-               Zigbee ZCZR 4MB with spiffs                                           PartitionScheme=zigbee_zczr
-               Zigbee ZCZR 8MB with spiffs                                           PartitionScheme=zigbee_zczr_8MB
-               Custom                                                                PartitionScheme=custom
-Option:        Core Debug Level                                                      DebugLevel
-               None                                           ✔                      DebugLevel=none
-               Error                                                                 DebugLevel=error
-               Warn                                                                  DebugLevel=warn
-               Info                                                                  DebugLevel=info
-               Debug                                                                 DebugLevel=debug
-               Verbose                                                               DebugLevel=verbose
-Option:        PSRAM                                                                 PSRAM
-               Disabled                                       ✔                      PSRAM=disabled
-               QSPI PSRAM                                                            PSRAM=enabled
-               OPI PSRAM                                                             PSRAM=opi
-Option:        Arduino Runs On                                                       LoopCore
-               Core 1                                         ✔                      LoopCore=1
-               Core 0                                                                LoopCore=0
-Option:        Events Run On                                                         EventsCore
-               Core 1                                         ✔                      EventsCore=1
-               Core 0                                                                EventsCore=0
-Option:        Erase All Flash Before Sketch Upload                                  EraseFlash
-               Disabled                                       ✔                      EraseFlash=none
-               Enabled                                                               EraseFlash=all
-Option:        JTAG Adapter                                                          JTAGAdapter
-               Disabled                                       ✔                      JTAGAdapter=default
-               Integrated USB JTAG                                                   JTAGAdapter=builtin
-               FTDI Adapter                                                          JTAGAdapter=external
-               ESP USB Bridge                                                        JTAGAdapter=bridge
-Option:        Zigbee Mode                                                           ZigbeeMode
-               Disabled                                       ✔                      ZigbeeMode=default
-               Zigbee ZCZR (coordinator/router)                                      ZigbeeMode=zczr
-Programmers:   ID                                             Name
-               esptool                                        Esptool
+# --- Bootloop-Verdacht --------------------------------------------------------------
+# Kein Serial-Output heißt nicht automatisch "abgestürzt": Der USB-Serial-JTAG-Port
+# existiert auch ohne laufende Firmware. Reset-Grund und Boot-Zähler stehen im Banner.
