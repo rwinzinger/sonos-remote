@@ -58,7 +58,8 @@ uint8_t  lastSW       = HIGH;
 // silently lost) and lv_timer_handler() does not run (frozen screen, ignored taps). That
 // was the cause of the sluggishness.
 enum class Cmd : uint8_t { VolumeDelta, RoomVolumeDelta, SyncStereoToMain,
-                           ToggleMain, ToggleStereo, LineIn, RefreshState };
+                           ToggleMain, ToggleStereo, SceneVinyl,
+                           SceneHiFi, SceneRadio, SceneTV, RefreshState };
 
 // Which room a RoomVolumeDelta targets.
 enum class Room : uint8_t { None, Main, Stereo };
@@ -82,6 +83,10 @@ volatile bool shLineIn      = false;
 volatile bool shBusy        = false;
 volatile bool shHaveCoord   = false;
 volatile bool shTargetGone  = false;   // SONOS_TARGET_ROOM absent from the topology
+volatile bool shPairSplit   = false;   // stereo pair currently separated (TV mode)
+volatile bool shGrouped     = false;   // Main and Stereo in one group
+volatile bool shStereoBt    = false;   // Stereo playing a Bluetooth/VLI source
+volatile bool shRightPlaying= false;   // split-off RIGHT speaker is producing sound
 volatile int  shStatusCode  = 0;   // see statusText()
 volatile uint32_t shStateSeq = 0;  // bumped whenever the flags above change
 
@@ -93,7 +98,7 @@ volatile int  shUserJobs    = 0;
 enum StatusCode : int {
   ST_NONE = 0, ST_CONNECTING, ST_FINDING, ST_READY, ST_NO_SONOS,
   ST_WORKING, ST_GROUPING, ST_DETACHING, ST_LINEIN_OK, ST_FAILED, ST_WIFI_FAILED,
-  ST_TARGET_GONE, ST_SYNCED
+  ST_TARGET_GONE, ST_SYNCED, ST_TV_READY
 };
 
 RTC_DATA_ATTR static uint32_t bootCount = 0;
@@ -234,11 +239,12 @@ void workerRefreshState() {
 
   bool grouped = sonos::roomsGrouped(ROOM_MAIN, ROOM_STEREO);
 
+  // "Active" means THIS ROOM IS MAKING SOUND — the same rule for both rooms. The earlier
+  // version derived Main from playback but Stereo from grouping, which showed Stereo lit
+  // and Main dark while neither was actually playing together.
   bool playing = false;
-  bool mainActive = sonos::isPlaying(ROOM_MAIN, playing) ? playing : false;
-
-  bool stereoActive = grouped;
-  if (!stereoActive && sonos::isPlaying(ROOM_STEREO, playing)) stereoActive = playing;
+  bool mainActive   = sonos::isPlaying(ROOM_MAIN, playing)   ? playing : false;
+  bool stereoActive = sonos::isPlaying(ROOM_STEREO, playing) ? playing : false;
 
   bool lineIn = false;
   sonos::isLineInActive(ROOM_MAIN, lineIn);
@@ -260,6 +266,17 @@ void workerRefreshState() {
   shStereoVol    = stereoVol;
   shHaveCoord    = sonos::haveCoordinator();
   shTargetGone   = sonos::targetRoomMissing();
+  shPairSplit    = sonos::stereoPairSeparated();
+  shGrouped      = grouped;
+  bool bt = false;
+  sonos::isBluetoothActive(ROOM_STEREO, bt);
+  shStereoBt     = bt;
+
+  // While the pair is split the right speaker is an independent zone with no dependable
+  // room name, so ask it by UUID.
+  bool rp = false;
+  if (shPairSplit) sonos::isPlayingUuid(sonos::rightSpeakerUuid(), rp);
+  shRightPlaying = rp;
   shStateSeq     = shStateSeq + 1;
 
   // Say so when the configured room is absent. Silently steering a different group while
@@ -377,13 +394,127 @@ void workerTask(void *) {
         shStatusCode = ok ? ST_READY : ST_FAILED;
         break;
       }
-      case Cmd::LineIn: {
+      case Cmd::SceneVinyl: {
+        // The whole record-player ritual: rebuild the pair if it was split for TV, join
+        // Stereo to Main, then switch Main to line-in and play. Grouping FIRST so the
+        // line-in stream is established on a coordinator that already owns both rooms.
         shStatusCode = ST_WORKING;
+        if (sonos::stereoPairSeparated()) {
+          sonos::createStereoPair();
+          vTaskDelay(pdMS_TO_TICKS(2500));       // re-pairing is a config change
+          sonos::refreshTopology();
+        }
+        if (!sonos::roomsGrouped(ROOM_MAIN, ROOM_STEREO)) {
+          bool bt = false;
+          if (sonos::isBluetoothActive(ROOM_STEREO, bt) && bt) {
+            sonos::stopRoom(ROOM_STEREO);      // a live source cannot follow another group
+            vTaskDelay(pdMS_TO_TICKS(800));
+          }
+          sonos::joinRoomTo(ROOM_STEREO, ROOM_MAIN);
+          vTaskDelay(pdMS_TO_TICKS(800));
+          sonos::refreshTopology();
+        }
         bool ok = sonos::playLineIn(ROOM_MAIN);
-        Serial.printf("[ui] Records -> line-in: %s\n", ok ? "ok" : "FAILED");
+        Serial.printf("[scene] Vinyl: %s\n", ok ? "ok" : "FAILED");
         vTaskDelay(pdMS_TO_TICKS(400));
         workerRefreshState();
         shStatusCode = ok ? ST_LINEIN_OK : ST_FAILED;
+        break;
+      }
+      case Cmd::SceneHiFi: {
+        // All active: pair intact, rooms joined, volumes equal.
+        shStatusCode = ST_WORKING;
+        if (sonos::stereoPairSeparated()) {
+          sonos::createStereoPair();
+          vTaskDelay(pdMS_TO_TICKS(2500));
+          sonos::refreshTopology();
+        }
+        bool ok = true;
+        if (!sonos::roomsGrouped(ROOM_MAIN, ROOM_STEREO)) {
+          // Main is ALWAYS the master. A speaker holding a live local source (Bluetooth,
+          // line-in) cannot become a follower, so release Stereo's source first — otherwise
+          // the join silently does nothing, which is what happened after the TV test.
+          bool bt = false;
+          if (sonos::isBluetoothActive(ROOM_STEREO, bt) && bt) {
+            Serial.println("[scene] HiFi: stopping Bluetooth on Stereo first");
+            sonos::stopRoom(ROOM_STEREO);
+            vTaskDelay(pdMS_TO_TICKS(800));
+          }
+          ok = sonos::joinRoomTo(ROOM_STEREO, ROOM_MAIN);
+          Serial.printf("[scene] HiFi: join Stereo -> Main: %s\n", ok ? "ok" : "FAILED");
+          vTaskDelay(pdMS_TO_TICKS(800));
+          sonos::refreshTopology();
+        }
+        int mainVol = -1;
+        if (sonos::getRoomVolume(ROOM_MAIN, mainVol)) {
+          sonos::setRoomVolume(ROOM_STEREO, mainVol);
+        }
+        Serial.printf("[scene] HiFi: joined+synced to %d: %s\n", mainVol,
+                      ok ? "ok" : "FAILED");
+        vTaskDelay(pdMS_TO_TICKS(300));
+        workerRefreshState();
+        shStatusCode = ok ? ST_READY : ST_FAILED;
+        break;
+      }
+      case Cmd::SceneRadio: {
+        // Main only. Detach Stereo, then start the configured station if there is one.
+        shStatusCode = ST_WORKING;
+        if (sonos::stereoPairSeparated()) {
+          sonos::createStereoPair();
+          vTaskDelay(pdMS_TO_TICKS(2500));
+          sonos::refreshTopology();
+        }
+        if (sonos::roomsGrouped(ROOM_MAIN, ROOM_STEREO)) {
+          sonos::detachRoom(ROOM_STEREO);
+          vTaskDelay(pdMS_TO_TICKS(600));
+          sonos::refreshTopology();
+        }
+        sonos::stopRoom(ROOM_STEREO);
+        bool ok = true;
+        if (strlen(SONOS_RADIO_URI) > 0) {
+          ok = sonos::playUriOn(ROOM_MAIN, SONOS_RADIO_URI);
+          Serial.printf("[scene] Radio: station %s\n", ok ? "playing" : "FAILED");
+        } else {
+          Serial.println("[scene] Radio: Main only (no SONOS_RADIO_URI configured)");
+        }
+        vTaskDelay(pdMS_TO_TICKS(400));
+        workerRefreshState();
+        shStatusCode = ok ? ST_READY : ST_FAILED;
+        break;
+      }
+      case Cmd::SceneTV: {
+        // Right speaker alone. SPLITS the stereo pair — a configuration change, so it is a
+        // toggle: tapping TV again rebuilds the pair.
+        shStatusCode = ST_WORKING;
+        if (sonos::stereoPairSeparated()) {
+          bool ok = sonos::createStereoPair();
+          Serial.printf("[scene] TV off: pair rebuilt: %s\n", ok ? "ok" : "FAILED");
+          vTaskDelay(pdMS_TO_TICKS(2500));
+          workerRefreshState();
+          shStatusCode = ok ? ST_READY : ST_FAILED;
+          break;
+        }
+        if (!sonos::stereoPairKnown()) {
+          Serial.println("[scene] TV: no ChannelMapSet known yet — cannot split the pair");
+          shStatusCode = ST_FAILED;
+          break;
+        }
+        // Ungroup first: splitting a pair that is mid-group leaves confusing state.
+        if (sonos::roomsGrouped(ROOM_MAIN, ROOM_STEREO)) {
+          sonos::detachRoom(ROOM_STEREO);
+          vTaskDelay(pdMS_TO_TICKS(600));
+          sonos::refreshTopology();
+        }
+        bool ok = sonos::separateStereoPair();
+        vTaskDelay(pdMS_TO_TICKS(2500));
+        sonos::refreshTopology();
+        // Silence everything except the right speaker. Done by UUID, not room name:
+        // separating the pair leaves both halves sharing a name, so name lookups break.
+        sonos::stopAllExcept(sonos::rightSpeakerUuid());
+        Serial.printf("[scene] TV: pair split (right speaker = \"%s\"): %s\n",
+                      sonos::rightSpeakerRoom(), ok ? "ok" : "FAILED");
+        workerRefreshState();
+        shStatusCode = ok ? ST_TV_READY : ST_FAILED;
         break;
       }
       case Cmd::RefreshState:
@@ -449,6 +580,19 @@ void onScreenChange(ui::Screen s) {
   }
 }
 
+// Screen 3. Each scene is one intent, applied idempotently — no toggling to reason about,
+// except TV, which must toggle because it changes the pair configuration.
+void onUiScene(ui::Scene sc) {
+  if (!shHaveCoord) { shStatusCode = ST_NO_SONOS; return; }
+  ui::setBusy(true);
+  shStatusCode = ST_WORKING;
+  switch (sc) {
+    case ui::Scene::HiFi:  enqueueUser(Cmd::SceneHiFi);  break;
+    case ui::Scene::Radio: enqueueUser(Cmd::SceneRadio); break;
+    case ui::Scene::TV:    enqueueUser(Cmd::SceneTV);    break;
+  }
+}
+
 void onUiTap(ui::Button b) {
   // LVGL already flipped the checkbox on click. Clear it at once — state is owned by the
   // worker and must reflect Sonos, not the tap.
@@ -464,7 +608,7 @@ void onUiTap(ui::Button b) {
   ui::setBusy(true);
   shStatusCode = ST_WORKING;
   switch (b) {
-    case ui::Button::Records: enqueueUser(Cmd::LineIn);       break;
+    case ui::Button::Vinyl:   enqueueUser(Cmd::SceneVinyl);   break;
     case ui::Button::Main:    enqueueUser(Cmd::ToggleMain);   break;
     case ui::Button::Stereo:  enqueueUser(Cmd::ToggleStereo); break;
   }
@@ -518,7 +662,7 @@ void setup() {
   if (!panel::begin()) {
     Serial.println("[boot] panel::begin reported a problem — continuing headless");
   }
-  ui::build(onUiTap, onUiAction, onScreenChange);
+  ui::build(onUiTap, onUiAction, onUiScene, onScreenChange);
   panel::loop();
 
   pinMode(ENCODER_A_PIN, INPUT);     // external 10K pull-ups on both lines
@@ -527,6 +671,7 @@ void setup() {
 
   if (connectWiFi()) {
     sonos::begin(SONOS_COORDINATOR_IP, SONOS_TARGET_ROOM);
+    sonos::setStereoRoomName(ROOM_STEREO);
     resolveAndReport();
   }
 
@@ -553,6 +698,7 @@ const char *statusText(int code) {
     case ST_WIFI_FAILED: return "wifi failed";
     case ST_TARGET_GONE: return "Main offline";
     case ST_SYNCED:      return "synced";
+    case ST_TV_READY:    return "right speaker only";
     // Idle shows the SONOS logo alone — no room name. Anything transient appears beneath
     // it and then expires back to this.
     case ST_READY:       return "";
@@ -579,7 +725,21 @@ void syncUiFromWorker() {
     lastSeq = shStateSeq;
     ui::setActive(ui::Button::Main,    shMainActive);
     ui::setActive(ui::Button::Stereo,  shStereoActive);
-    ui::setActive(ui::Button::Records, shLineIn);
+    ui::setActive(ui::Button::Vinyl, shLineIn);
+    ui::setStereoSplit(shPairSplit, shRightPlaying);
+    // Screen 3: highlight whichever mode the system is actually in, derived from real
+    // state rather than remembering which button was last pressed.
+    // TV is a configuration; HiFi means joined; Radio means Main alone and playing. A
+    // state that is none of these (e.g. Stereo playing on its own) highlights NOTHING
+    // rather than picking the closest match and lying about it.
+    // TV means "the TV is playing through the speakers", which is true whenever Stereo has
+    // a Bluetooth source — with or without the pair being split. Keying it only off the
+    // split made the actual TV setup show no mode at all.
+    ui::setSceneActive(ui::Scene::TV, shPairSplit || shStereoBt);
+    ui::setSceneActive(ui::Scene::HiFi, !shPairSplit && !shStereoBt && shGrouped);
+    ui::setSceneActive(ui::Scene::Radio,
+                       !shPairSplit && !shStereoBt && !shGrouped && shMainActive &&
+                       !shStereoActive);
     if (shVolume >= 0) {
       currentVolume = shVolume;      // reconcile the optimistic echo with reality
       ui::setVolume(currentVolume);

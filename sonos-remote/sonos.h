@@ -33,6 +33,12 @@ struct Zone {
 
 void begin(const char *preferredIp, const char *targetRoom);
 
+// Tell the module which room name refers to the stereo PAIR. Lookups for that name then
+// fall back to the pair's stable UUID when the name no longer matches — which happens
+// permanently after the first split, because Sonos reverts the pair's name and re-pairing
+// does not restore it.
+void setStereoRoomName(const char *room);
+
 // Full resolve: SSDP discovery + topology. Costs ~1.5 s — first run and recovery only.
 ResolveResult resolveCoordinator();
 
@@ -100,8 +106,38 @@ bool playLineIn(const char *room);
 // Is line-in the current source for `room`?
 bool isLineInActive(const char *room, bool &activeOut);
 
+// --- stereo pair (Era 100 L/R) ---------------------------------------------------------
+// The pair can be split and rebuilt over UPnP: DeviceProperties exposes SeparateStereoPair
+// and CreateStereoPair. Splitting turns the RIGHT speaker into a normal addressable zone.
+//
+// This is a CONFIGURATION change, not a playback one: it takes a few seconds and the pair
+// visibly disappears/reappears in the Sonos app. The ChannelMapSet needed to rebuild the
+// pair is only present in the topology WHILE paired, so it is cached in NVS — otherwise a
+// split pair could not be restored after a reboot.
+bool stereoPairKnown();        // a ChannelMapSet has been seen or restored from NVS
+bool stereoPairSeparated();    // the right speaker is currently its own visible zone
+bool separateStereoPair();
+bool createStereoPair();         // also restores the pair's name (see setStereoRoomName)
+
+// Restore the pair's zone name. Called automatically by createStereoPair(); exposed for
+// repairing a pair that was split by something other than this firmware.
+bool renameStereoPair(const char *name);
+const char *rightSpeakerRoom();  // room name of the split-off right speaker, "" if paired
+const char *rightSpeakerUuid();  // stable identity — names are unreliable after a split
+bool stopAllExcept(const char *keepUuid);   // silence everything but that zone
+
 // --- transport --------------------------------------------------------------------------
 bool isPlaying(const char *room, bool &playingOut);
+
+// True when the room is playing a Bluetooth / virtual line-in source. Used to recognise the
+// TV setup even when the stereo pair is still bonded.
+bool isBluetoothActive(const char *room, bool &activeOut);
+
+// Transport of a specific zone by UUID. Needed for the split-off RIGHT speaker, which has
+// no reliable room name of its own once the pair is separated.
+bool isPlayingUuid(const char *uuid, bool &playingOut);
+bool stopRoom(const char *room);
+bool playUriOn(const char *room, const char *uri);   // e.g. a radio stream
 
 const char *coordinatorIp();
 const char *coordinatorRoom();

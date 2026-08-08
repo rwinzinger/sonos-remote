@@ -1,7 +1,14 @@
-// Two screens on the 480x480 round panel, swipe left/right between them.
+// Three screens on the 480x480 round panel: Home -> Volume -> Modes.
+// Swipe LEFT to advance, RIGHT to go back (a linear chain, not a carousel).
 //
 // SCREEN 1 (from specs.txt):
-//     12 o'clock = "Records"   9 = "Main"   3 = "Stereo"   6 = volume   centre = SONOS
+//     12 o'clock = "Vinyl"     9 = "Main"   3 = "Stereo"   6 = volume   centre = SONOS
+//   "Vinyl" is a SCENE, not just a source select: join Stereo to Main, switch Main to
+//   the Plattenspieler line-in, and play — the whole record-player ritual in one tap.
+//
+// SCREEN 3 (one-tap modes): 12 = "Radio"   9 = "HiFi"   3 = "TV"
+//   Scenes hide the grouping model entirely: each is a single intent, so a guest never has
+//   to reason about join/detach.
 //
 // SCREEN 2 (per-room volume):
 //     12 o'clock = "Sync"      9 = "Main"   3 = "Stereo"   6 = volume   centre = VOLUME
@@ -18,22 +25,31 @@
 
 namespace ui {
 
-enum class Button { Records, Main, Stereo };          // screen 1
+enum class Button { Vinyl, Main, Stereo };            // screen 1
 enum class Action { Sync, SelectMain, SelectStereo }; // screen 2
 enum class Selection { None, Main, Stereo };
-enum class Screen { Home, Volume };
+enum class Scene  { HiFi, Radio, TV };                // screen 3
+enum class Screen { Home, Volume, Modes };
 
 typedef void (*TapHandler)(Button);
 typedef void (*ActionHandler)(Action);
+typedef void (*SceneHandler)(Scene);
 typedef void (*ScreenChangeHandler)(Screen);
 
-void build(TapHandler taps, ActionHandler actions, ScreenChangeHandler onScreenChange);
+void build(TapHandler taps, ActionHandler actions, SceneHandler scenes,
+           ScreenChangeHandler onScreenChange);
 
-// Volume readout — applied to BOTH screens so swiping never shows a stale number.
+// Volume readout — applied to ALL screens so swiping never shows a stale number.
 void setVolume(int volume);                             // group volume, -1 = unknown
 void setRoomVolumes(int mainVol, int stereoVol);        // "main / stereo" breakdown
 
 void setActive(Button b, bool active);                  // screen 1 toggle state
+void setSceneActive(Scene s, bool active);             // screen 3 highlight
+
+// Draw the Stereo button as two halves while the pair is SPLIT (TV mode): left half idle,
+// right half blue when the right speaker is playing. A single on/off state cannot describe
+// two independent speakers.
+void setStereoSplit(bool split, bool rightActive);
 void setStatus(const char *text);
 void setBusy(bool busy);
 

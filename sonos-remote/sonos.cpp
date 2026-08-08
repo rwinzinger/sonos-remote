@@ -1,6 +1,7 @@
 #include "sonos.h"
 
 #include <HTTPClient.h>
+#include <ESPmDNS.h>
 #include <Preferences.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
@@ -16,10 +17,12 @@ const char *PATH_GROUP_RENDERING = "/MediaRenderer/GroupRenderingControl/Control
 const char *PATH_AVTRANSPORT     = "/MediaRenderer/AVTransport/Control";
 const char *PATH_RENDERING       = "/MediaRenderer/RenderingControl/Control";
 const char *PATH_TOPOLOGY        = "/ZoneGroupTopology/Control";
+const char *PATH_DEVICEPROPS     = "/DeviceProperties/Control";
 const char *SVC_GROUP_RENDERING  = "urn:schemas-upnp-org:service:GroupRenderingControl:1";
 const char *SVC_AVTRANSPORT      = "urn:schemas-upnp-org:service:AVTransport:1";
 const char *SVC_RENDERING        = "urn:schemas-upnp-org:service:RenderingControl:1";
 const char *SVC_TOPOLOGY         = "urn:schemas-upnp-org:service:ZoneGroupTopology:1";
+const char *SVC_DEVICEPROPS      = "urn:schemas-upnp-org:service:DeviceProperties:1";
 
 String preferredIp_;
 String targetRoom_;
@@ -33,6 +36,17 @@ String lastGoodIp_;
 // True when the configured target room is absent from the topology and we are steering a
 // different group instead.
 bool targetMissing_ = false;
+
+// "UUID_LF:LF,LF;UUID_RF:RF,RF" — the argument both SeparateStereoPair and CreateStereoPair
+// need. Only visible in the topology while the pair EXISTS, so it is cached in NVS.
+String pairMapSet_;
+
+// The room name that MEANS "the stereo pair". Needed because splitting the pair makes
+// Sonos revert both halves to their pre-pair names (seen live: "Stereo" became
+// "Wohnzimmer"), and re-pairing KEEPS the reverted name — so a name lookup for the pair
+// fails permanently after the first TV mode. Names are user-editable and Sonos-editable;
+// the pair's UUID is not.
+String stereoRoomName_;
 
 Zone    zones_[MAX_ZONES];
 uint8_t zoneCount_ = 0;
@@ -151,6 +165,35 @@ uint8_t discoverPlayers(String out[], uint8_t maxOut) {
   return found;
 }
 
+// Sonos players advertise _sonos._tcp over mDNS — verified live on this network, with
+// instance names of the form "RINCON_<uuid>@<roomName>". This is the discovery path the
+// Sonos app effectively uses, and it works where SSDP multicast does not, which is why it
+// is tried BEFORE SSDP here.
+bool mdnsStarted_ = false;
+
+uint8_t discoverViaMdns(String out[], uint8_t maxOut) {
+  if (!mdnsStarted_) {
+    // The hostname we register is irrelevant to querying; it just has to be unique-ish.
+    mdnsStarted_ = MDNS.begin("sonos-remote");
+    if (!mdnsStarted_) {
+      Serial.println("[sonos] MDNS.begin failed");
+      return 0;
+    }
+  }
+
+  int n = MDNS.queryService("sonos", "tcp");
+  uint8_t found = 0;
+  for (int i = 0; i < n && found < maxOut; i++) {
+    String ip = MDNS.IP(i).toString();
+    if (ip.isEmpty() || ip == "0.0.0.0") continue;
+    bool dup = false;
+    for (uint8_t j = 0; j < found; j++) if (out[j] == ip) { dup = true; break; }
+    if (!dup) out[found++] = ip;
+  }
+  if (found) Serial.printf("[sonos] mDNS found %u player(s)\n", found);
+  return found;
+}
+
 // Fill zones_ from a GetZoneGroupState document.
 void parseTopology(const String &topology) {
   zoneCount_ = 0;
@@ -190,6 +233,10 @@ void parseTopology(const String &topology) {
       z.ip             = ip;
       z.groupCoordUuid = coordUuid;
       z.invisible      = (attr(member, "Invisible") == "1");
+
+      // Seen on both members of a bonded pair; remember it so the pair can be rebuilt.
+      String cms = attr(member, "ChannelMapSet");
+      if (cms.length() && cms.indexOf(":RF") >= 0) pairMapSet_ = cms;
     }
   }
 }
@@ -200,6 +247,24 @@ const Zone *zoneByUuid(const String &uuid) {
   }
   return nullptr;
 }
+
+// "UUID_LF:LF,LF;UUID_RF:RF,RF" -> the UUID marked RF / LF.
+String rfUuidFromMapSet(const String &cms) {
+  int rf = cms.indexOf(":RF");
+  if (rf < 0) return "";
+  int start = cms.lastIndexOf(';', rf);
+  start = (start < 0) ? 0 : start + 1;
+  return cms.substring(start, rf);
+}
+
+String lfUuidFromMapSet(const String &cms) {
+  int lf = cms.indexOf(":LF");
+  if (lf < 0) return "";
+  int start = cms.lastIndexOf(';', lf);
+  start = (start < 0) ? 0 : start + 1;
+  return cms.substring(start, lf);
+}
+
 
 // Remembered player IPs, so a reboot does not depend on SSDP.
 //
@@ -216,9 +281,10 @@ void saveKnownIps() {
     if (joined.length()) joined += ",";
     joined += zones_[i].ip;
   }
-  if (joined.isEmpty()) return;
+  if (joined.isEmpty() && pairMapSet_.isEmpty()) return;
   if (prefs_.begin("sonos", false)) {
-    prefs_.putString("ips", joined);
+    if (joined.length())      prefs_.putString("ips", joined);
+    if (pairMapSet_.length()) prefs_.putString("cms", pairMapSet_);
     prefs_.end();
   }
 }
@@ -226,6 +292,7 @@ void saveKnownIps() {
 uint8_t loadKnownIps(String out[], uint8_t maxOut) {
   if (!prefs_.begin("sonos", true)) return 0;
   String joined = prefs_.getString("ips", "");
+  if (pairMapSet_.isEmpty()) pairMapSet_ = prefs_.getString("cms", "");
   prefs_.end();
 
   uint8_t n = 0;
@@ -283,6 +350,10 @@ bool applyCoordinator() {
 
 // -------------------------------------------------------------------------- public API
 
+void setStereoRoomName(const char *room) {
+  stereoRoomName_ = room ? room : "";
+}
+
 void begin(const char *preferredIp, const char *targetRoom) {
   preferredIp_ = preferredIp ? preferredIp : "";
   targetRoom_  = targetRoom ? targetRoom : "";
@@ -314,6 +385,12 @@ ResolveResult resolveCoordinator() {
   uint8_t s = loadKnownIps(saved, MAX_ZONES);
   for (uint8_t i = 0; i < s; i++) addCandidate(saved[i]);
   if (s) Serial.printf("[sonos] %u remembered player IP(s) from NVS\n", s);
+
+  // mDNS before SSDP: SSDP multicast stopped answering entirely on this network once,
+  // from the board AND from a laptop, while mDNS kept working.
+  String viaMdns[MAX_ZONES];
+  uint8_t m = discoverViaMdns(viaMdns, MAX_ZONES);
+  for (uint8_t i = 0; i < m; i++) addCandidate(viaMdns[i]);
 
   String discovered[MAX_ZONES];
   uint8_t n = discoverPlayers(discovered, MAX_ZONES);
@@ -372,6 +449,16 @@ const Zone *zoneByRoom(const char *room) {
   for (uint8_t i = 0; i < zoneCount_; i++) {
     // Skip bonded satellites: they answer nothing useful and must never be targeted.
     if (!zones_[i].invisible && zones_[i].room.equalsIgnoreCase(room)) return &zones_[i];
+  }
+
+  // Fallback for the stereo pair ONLY. Separating the pair makes Sonos revert both halves
+  // to their pre-pair names, and re-pairing keeps the reverted name — so after one TV mode
+  // the configured name matches nothing and every lookup for it fails permanently. The
+  // pair's LF UUID is stable across split/rebuild, so use that instead.
+  if (!stereoRoomName_.isEmpty() && !pairMapSet_.isEmpty() &&
+      stereoRoomName_.equalsIgnoreCase(room)) {
+    const Zone *lf = zoneByUuid(lfUuidFromMapSet(pairMapSet_));
+    if (lf && !lf->invisible) return lf;
   }
   return nullptr;
 }
@@ -468,15 +555,10 @@ uint8_t adjustVolumeAllRooms(int adjustment, int &volumeOut) {
     // double-apply and break the stereo pair's balance.
     if (z.invisible) continue;
 
-    // One call per ROOM. Guard against a duplicate visible entry for the same room.
-    bool already = false;
-    for (uint8_t j = 0; j < i; j++) {
-      if (!zones_[j].invisible && zones_[j].room.equalsIgnoreCase(zones_[i].room)) {
-        already = true;
-        break;
-      }
-    }
-    if (already) continue;
+    // NOTE: do NOT de-duplicate by room NAME. Separating a stereo pair leaves both halves
+    // carrying the same name (seen live: both became "Wohnzimmer"), and skipping the second
+    // one means the right speaker's volume silently never moves. Bonded satellites are
+    // already excluded by the invisible check above, which is the only case that needed it.
 
     String params = "<Channel>Master</Channel><Adjustment>" + String(adjustment) +
                     "</Adjustment>";
@@ -550,6 +632,132 @@ bool detachRoom(const char *room) {
   return !resp.isEmpty();
 }
 
+// ------------------------------------------------------------------------ stereo pair
+
+bool stereoPairKnown() { return !pairMapSet_.isEmpty(); }
+
+bool stereoPairSeparated() {
+  if (pairMapSet_.isEmpty()) return false;
+  String rf = rfUuidFromMapSet(pairMapSet_);
+  if (rf.isEmpty()) return false;
+  // While paired the RF speaker is Invisible; once separated it stands as its own zone.
+  const Zone *z = zoneByUuid(rf);
+  return z && !z->invisible;
+}
+
+const char *rightSpeakerRoom() {
+  static String room;
+  room = "";
+  if (pairMapSet_.isEmpty()) return room.c_str();
+  const Zone *z = zoneByUuid(rfUuidFromMapSet(pairMapSet_));
+  if (z && !z->invisible) room = z->room;
+  return room.c_str();
+}
+
+bool separateStereoPair() {
+  if (pairMapSet_.isEmpty()) {
+    Serial.println("[sonos] no ChannelMapSet known — cannot separate the pair");
+    return false;
+  }
+  // Send to the LF speaker: it is the pair's coordinator and the one that still answers.
+  const Zone *lf = zoneByUuid(lfUuidFromMapSet(pairMapSet_));
+  if (!lf) return false;
+  String params = "<ChannelMapSet>" + escapeXml(pairMapSet_) + "</ChannelMapSet>";
+  // DeviceProperties actions take NO InstanceID.
+  String resp = soapCall(lf->ip, PATH_DEVICEPROPS, SVC_DEVICEPROPS, "SeparateStereoPair",
+                         params, false);
+  Serial.printf("[sonos] SeparateStereoPair: %s\n", resp.isEmpty() ? "FAILED" : "ok");
+  return !resp.isEmpty();
+}
+
+// Restore the pair's zone name. Rebuilding a pair leaves it under the PRE-PAIR name
+// ("Wohnzimmer" here), so without this every TV toggle silently renames the user's room.
+// Icon and configuration are read first and passed back unchanged — SetZoneAttributes
+// takes all three, and omitting them would blank them.
+bool renameStereoPair(const char *name) {
+  if (pairMapSet_.isEmpty() || !name || !*name) return false;
+  const Zone *lf = zoneByUuid(lfUuidFromMapSet(pairMapSet_));
+  if (!lf) return false;
+
+  String cur = soapCall(lf->ip, PATH_DEVICEPROPS, SVC_DEVICEPROPS, "GetZoneAttributes",
+                        "", false);
+  if (cur.isEmpty()) return false;
+  String curName = between(cur, "<CurrentZoneName>", "</CurrentZoneName>");
+  if (curName == name) return true;                    // already correct, no write
+
+  String icon = between(cur, "<CurrentIcon>", "</CurrentIcon>");
+  String conf = between(cur, "<CurrentConfiguration>", "</CurrentConfiguration>");
+  String params = "<DesiredZoneName>" + escapeXml(String(name)) + "</DesiredZoneName>"
+                  "<DesiredIcon>" + escapeXml(icon) + "</DesiredIcon>"
+                  "<DesiredConfiguration>" + escapeXml(conf) + "</DesiredConfiguration>";
+  bool ok = !soapCall(lf->ip, PATH_DEVICEPROPS, SVC_DEVICEPROPS, "SetZoneAttributes",
+                      params, false).isEmpty();
+  Serial.printf("[sonos] renamed pair \"%s\" -> \"%s\": %s\n",
+                curName.c_str(), name, ok ? "ok" : "FAILED");
+  return ok;
+}
+
+bool createStereoPair() {
+  if (pairMapSet_.isEmpty()) return false;
+  const Zone *lf = zoneByUuid(lfUuidFromMapSet(pairMapSet_));
+  if (!lf) return false;
+  String params = "<ChannelMapSet>" + escapeXml(pairMapSet_) + "</ChannelMapSet>";
+  String resp = soapCall(lf->ip, PATH_DEVICEPROPS, SVC_DEVICEPROPS, "CreateStereoPair",
+                         params, false);
+  Serial.printf("[sonos] CreateStereoPair: %s\n", resp.isEmpty() ? "FAILED" : "ok");
+  if (resp.isEmpty()) return false;
+
+  // Done HERE rather than at the call sites so it cannot be forgotten by a future scene.
+  // The speaker needs a moment after re-pairing before it accepts the rename.
+  if (!stereoRoomName_.isEmpty()) {
+    delay(2000);
+    refreshTopology();                       // the rebuilt pair needs re-locating first
+    renameStereoPair(stereoRoomName_.c_str());
+  }
+  return true;
+}
+
+// Stop every visible zone except the one with this UUID. Used by TV mode: after a split,
+// room NAMES are unreliable (both halves are called the same thing), so target by UUID.
+bool stopAllExcept(const char *keepUuid) {
+  bool allOk = true;
+  for (uint8_t i = 0; i < zoneCount_; i++) {
+    if (zones_[i].invisible) continue;
+    if (keepUuid && zones_[i].uuid == keepUuid) continue;
+    if (soapCall(zones_[i].ip, PATH_AVTRANSPORT, SVC_AVTRANSPORT, "Stop", "<Speed>1</Speed>")
+            .isEmpty()) {
+      allOk = false;
+    }
+  }
+  return allOk;
+}
+
+const char *rightSpeakerUuid() {
+  static String uuid;
+  uuid = pairMapSet_.isEmpty() ? String("") : rfUuidFromMapSet(pairMapSet_);
+  return uuid.c_str();
+}
+
+bool stopRoom(const char *room) {
+  const Zone *z = zoneByRoom(room);
+  if (!z) return false;
+  return !soapCall(z->ip, PATH_AVTRANSPORT, SVC_AVTRANSPORT, "Stop", "<Speed>1</Speed>")
+              .isEmpty();
+}
+
+bool playUriOn(const char *room, const char *uri) {
+  const Zone *z = zoneByRoom(room);
+  if (!z || !uri || !*uri) return false;
+  String params = "<CurrentURI>" + escapeXml(String(uri)) + "</CurrentURI>"
+                  "<CurrentURIMetaData></CurrentURIMetaData>";
+  if (soapCall(z->ip, PATH_AVTRANSPORT, SVC_AVTRANSPORT, "SetAVTransportURI",
+               params).isEmpty()) {
+    return false;
+  }
+  return !soapCall(z->ip, PATH_AVTRANSPORT, SVC_AVTRANSPORT, "Play", "<Speed>1</Speed>")
+              .isEmpty();
+}
+
 // ----------------------------------------------------------------------------- line-in
 
 bool playLineIn(const char *room) {
@@ -575,6 +783,29 @@ bool isLineInActive(const char *room, bool &activeOut) {
   if (resp.isEmpty()) return false;
   String uri = between(resp, "<CurrentURI>", "</CurrentURI>");
   activeOut = uri.startsWith("x-rincon-stream:");
+  return true;
+}
+
+// Is this room playing a Bluetooth / virtual line-in source? Sonos exposes those as
+// "x-sonos-vli:<uuid>:<n>,bluetooth:<n>" — seen live while the TV was connected.
+bool isBluetoothActive(const char *room, bool &activeOut) {
+  const Zone *z = zoneByRoom(room);
+  if (!z) return false;
+  String resp = soapCall(z->ip, PATH_AVTRANSPORT, SVC_AVTRANSPORT, "GetMediaInfo");
+  if (resp.isEmpty()) return false;
+  String uri = between(resp, "<CurrentURI>", "</CurrentURI>");
+  activeOut = (uri.indexOf("bluetooth") >= 0);
+  return true;
+}
+
+bool isPlayingUuid(const char *uuid, bool &playingOut) {
+  if (!uuid || !*uuid) return false;
+  const Zone *z = zoneByUuid(String(uuid));
+  if (!z) return false;
+  String resp = soapCall(z->ip, PATH_AVTRANSPORT, SVC_AVTRANSPORT, "GetTransportInfo");
+  if (resp.isEmpty()) return false;
+  String state = between(resp, "<CurrentTransportState>", "</CurrentTransportState>");
+  playingOut = (state == "PLAYING" || state == "TRANSITIONING");
   return true;
 }
 

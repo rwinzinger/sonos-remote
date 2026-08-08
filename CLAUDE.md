@@ -400,6 +400,75 @@ bonded pair gets double-adjusted). Consequence accepted deliberately: the knob n
 matches the Sonos app's group slider, which still uses the proportional model — so dragging
 that slider can reassert the app's balance.
 
+## Screen 3 — one-tap modes, and the traps behind them
+
+`Radio` 12 o'clock, `HiFi` 9, `TV` 3. Scenes exist so the grouping model never has to be
+reasoned about — each is one intent, applied idempotently.
+
+| Mode | Does |
+|---|---|
+| HiFi | rebuild pair if split, stop any Bluetooth on Stereo, join Stereo -> Main, sync volumes |
+| Radio | rebuild pair, detach + stop Stereo, play `SONOS_RADIO_URI` on Main |
+| TV | split the pair, silence everything except the right speaker (toggle: tap again rebuilds) |
+
+`Vinyl` on Screen 1 is also a scene: rebuild pair -> join Stereo to Main -> Main to line-in -> play.
+
+**Trap 1 — room NAMES are not stable identifiers.** `SeparateStereoPair` makes Sonos revert
+both halves to their PRE-PAIR names (measured: "Stereo" became "Wohnzimmer"), and
+`CreateStereoPair` does NOT restore the name. After one TV mode, `ROOM_STEREO = "Stereo"`
+matched nothing and every lookup for it failed permanently — HiFi could not find the room to
+join, which looked like "re-pairing is broken" but was not. `zoneByRoom()` therefore falls
+back to the pair's **LF UUID** (from the cached `ChannelMapSet`) when the configured stereo
+name matches nothing. Never assume a room name persists; it is user-editable AND
+Sonos-editable.
+
+**Trap 2 — a speaker holding a live LOCAL SOURCE cannot become a follower.** While Stereo
+streamed the TV over Bluetooth, `joinRoomTo(Stereo -> Main)` silently did nothing. Scenes
+that group Stereo under Main must STOP its source first. Bluetooth/virtual line-in shows up
+as `x-sonos-vli:<uuid>:<n>,bluetooth:<n>`; note the RIGHT speaker hosts that stream even
+while the pair is bonded, so the pair plays TV audio without being split.
+
+**Trap 3 — "active" must mean the same thing for both rooms.** An earlier version derived
+Main from playback but Stereo from grouping, which showed Stereo lit and Main dark while
+neither was playing together. Both now mean *this room's group is producing sound*.
+
+**Mode highlighting is derived from real state, and stays honest.** TV = Bluetooth source
+present OR pair split. HiFi = grouped, no Bluetooth. Radio = Main alone and playing, no
+Bluetooth. A state matching none of them (e.g. Stereo alone on Bluetooth before the fix)
+highlights NOTHING rather than picking the nearest mode and lying.
+
+**Decision: Main is ALWAYS the master.** HiFi joins Stereo to Main, never the reverse — so it
+deliberately stops TV audio. Chosen over "join toward whatever is playing" because a
+predictable master beats preserving whatever happened to be on.
+
+**Stereo pair split/rebuild works over UPnP** — `DeviceProperties` exposes `CreateStereoPair`
+and `SeparateStereoPair`, taking the `ChannelMapSet`
+(`UUID_LF:LF,LF;UUID_RF:RF,RF`). That string only appears in the topology WHILE paired, so it
+is cached in NVS (`sonos`/`cms`) — without it a split pair could not be rebuilt after a
+reboot, stranding the speakers.
+
+**Discovery: mDNS, not a fixed DHCP lease.** Sonos players advertise `_sonos._tcp` with
+instance names `RINCON_<uuid>@<roomName>` — verified from both a laptop and the board. Order
+is now **cached NVS IPs -> mDNS -> SSDP**, with SSDP last because it is the one that failed
+here. `SONOS_COORDINATOR_IP` is consequently EMPTY; it exists only as a manual override.
+(The user's FRITZ!Box does not offer fixed-lease settings for these devices, so this had to
+work without one.)
+
+**The pair's NAME is restored automatically.** `createStereoPair()` calls
+`renameStereoPair()` internally — at the call site it would eventually be forgotten — reading
+the current attributes and writing back the wanted name with icon and configuration
+preserved (`SetZoneAttributes` takes all three; omitting them blanks them). It skips the
+write when the name is already right.
+
+**Split-pair indicator.** While separated, the Stereo button on the home AND volume screens
+draws as two halves: left idle, right blue *only when the right speaker is actually playing*.
+Position it with `lv_obj_set_pos`, NOT `lv_obj_align` — align works against the parent's
+CONTENT area (inside padding and border), which puts the seam at ~35% instead of 50%.
+`BORDER_W` is shared between the border style and that maths so they cannot drift.
+
+**Bluetooth to the split-off right speaker is confirmed working** for TV audio. Selecting the
+Bluetooth source itself is still done from the phone; only the pairing/grouping is automated.
+
 ## Screen 2 — per-room volume
 
 Swipe LEFT for Screen 2, RIGHT to return. Layout mirrors Screen 1 with `Sync`

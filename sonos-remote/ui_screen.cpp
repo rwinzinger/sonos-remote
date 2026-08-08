@@ -10,6 +10,9 @@ namespace {
 // a 110 px button fully inside the glass with margin for the bezel.
 const int RADIUS    = 150;
 const int BTN_SIZE  = 110;
+// Single source of truth: the same value is used for the border style AND for the maths
+// that positions the split overlay, which must line up with the button's true centre.
+const int BORDER_W  = 3;
 
 // Active state is carried by HUE, not brightness — grey-on-grey was too subtle to read at a
 // glance. Faces stay light because the Sonos device icons are near-black and cannot be
@@ -42,18 +45,31 @@ struct ScreenWidgets {
 
 ScreenWidgets home_;
 ScreenWidgets vol_;
+ScreenWidgets modes_;
 
-lv_obj_t *btnRecords = nullptr;
+lv_obj_t *btnVinyl   = nullptr;
 lv_obj_t *btnMainS1  = nullptr;
 lv_obj_t *btnStereoS1= nullptr;
 lv_obj_t *btnSync    = nullptr;
 lv_obj_t *btnMainS2  = nullptr;
 lv_obj_t *btnStereoS2= nullptr;
+lv_obj_t *btnHiFi    = nullptr;
+lv_obj_t *btnRadio   = nullptr;
+lv_obj_t *btnTV      = nullptr;
+// Overlay showing the stereo pair SPLIT: left half stays the button face, right half is
+// drawn over it. Clipped to the circle by the parent's clip_corner style.
+struct SplitOverlay {
+  lv_obj_t *rightHalf = nullptr;
+  lv_obj_t *divider   = nullptr;
+};
+SplitOverlay splitHome_;
+SplitOverlay splitVol_;
 lv_obj_t *lblStatus  = nullptr;
 lv_obj_t *spinner    = nullptr;
 
 TapHandler          tapHandler    = nullptr;
 ActionHandler       actionHandler = nullptr;
+SceneHandler        sceneHandler  = nullptr;
 ScreenChangeHandler screenHandler = nullptr;
 
 Selection selection_   = Selection::None;
@@ -61,17 +77,26 @@ Screen    current_     = Screen::Home;
 int       lastMainVol_  = -1;
 int       lastStereoVol_= -1;
 
-Button tagRecords = Button::Records;
+Button tagVinyl   = Button::Vinyl;
 Button tagMainS1  = Button::Main;
 Button tagStereoS1= Button::Stereo;
 Action tagSync    = Action::Sync;
 Action tagMainS2  = Action::SelectMain;
 Action tagStereoS2= Action::SelectStereo;
+Scene  tagHiFi    = Scene::HiFi;
+Scene  tagRadio   = Scene::Radio;
+Scene  tagTV      = Scene::TV;
 
 void onTapEvent(lv_event_t *e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED || !tapHandler) return;
   Button *which = (Button *)lv_event_get_user_data(e);
   if (which) tapHandler(*which);
+}
+
+void onSceneEvent(lv_event_t *e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED || !sceneHandler) return;
+  Scene *which = (Scene *)lv_event_get_user_data(e);
+  if (which) sceneHandler(*which);
 }
 
 void onActionEvent(lv_event_t *e) {
@@ -86,9 +111,52 @@ void showScreen(Screen s);
 // LV_OBJ_FLAG_GESTURE_BUBBLE set or a swipe starting on one would be swallowed.
 void onGesture(lv_event_t *e) {
   lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_get_act());
-  if (dir == LV_DIR_LEFT)       showScreen(Screen::Volume);
-  else if (dir == LV_DIR_RIGHT) showScreen(Screen::Home);
+  int idx = (int)current_;
+  if (dir == LV_DIR_LEFT)       idx++;
+  else if (dir == LV_DIR_RIGHT) idx--;
+  else return;
+  // Clamp rather than wrap: on a 3-screen chain, wrapping makes it easy to overshoot and
+  // lose track of where you are.
+  if (idx < 0) idx = 0;
+  if (idx > (int)Screen::Modes) idx = (int)Screen::Modes;
+  showScreen((Screen)idx);
 }
+
+// Draw the right half of a circular button in a different colour, for the split stereo
+// pair. Positioned with lv_obj_set_pos, NOT lv_obj_align: align works against the parent's
+// CONTENT area (inside padding and border), which pushed the seam left of centre. Content
+// origin sits BORDER_W in, so that offset is compensated explicitly to put the seam on the
+// button's true middle. clip_corner on the parent trims the rectangle to a half-disc.
+void attachSplitOverlay(lv_obj_t *btn, SplitOverlay &ov) {
+  lv_obj_set_style_clip_corner(btn, true, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(btn, 0, LV_PART_MAIN);
+
+  ov.rightHalf = lv_obj_create(btn);
+  lv_obj_set_size(ov.rightHalf, BTN_SIZE / 2, BTN_SIZE);
+  lv_obj_set_pos(ov.rightHalf, BTN_SIZE / 2 - BORDER_W, -BORDER_W);
+  lv_obj_set_style_radius(ov.rightHalf, 0, LV_PART_MAIN);
+  lv_obj_set_style_border_width(ov.rightHalf, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(ov.rightHalf, 0, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(ov.rightHalf, lv_color_hex(ACCENT_FILL), LV_PART_MAIN);
+  lv_obj_clear_flag(ov.rightHalf, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(ov.rightHalf, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_move_background(ov.rightHalf);
+  lv_obj_add_flag(ov.rightHalf, LV_OBJ_FLAG_HIDDEN);
+
+  ov.divider = lv_obj_create(btn);
+  lv_obj_set_size(ov.divider, 2, BTN_SIZE);
+  lv_obj_set_pos(ov.divider, BTN_SIZE / 2 - BORDER_W - 1, -BORDER_W);
+  lv_obj_set_style_radius(ov.divider, 0, LV_PART_MAIN);
+  lv_obj_set_style_border_width(ov.divider, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(ov.divider, 0, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(ov.divider, lv_color_hex(BG), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(ov.divider, LV_OPA_40, LV_PART_MAIN);
+  lv_obj_clear_flag(ov.divider, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(ov.divider, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_move_background(ov.divider);
+  lv_obj_add_flag(ov.divider, LV_OBJ_FLAG_HIDDEN);
+}
+
 
 lv_obj_t *makeButton(lv_obj_t *parent, const char *text, int dx, int dy,
                      const lv_img_dsc_t *icon, const char *symbol,
@@ -99,7 +167,7 @@ lv_obj_t *makeButton(lv_obj_t *parent, const char *text, int dx, int dy,
 
   lv_obj_set_style_radius(btn, LV_RADIUS_CIRCLE, LV_PART_MAIN);
   lv_obj_set_style_bg_color(btn, lv_color_hex(IDLE_FILL), LV_PART_MAIN);
-  lv_obj_set_style_border_width(btn, 3, LV_PART_MAIN);
+  lv_obj_set_style_border_width(btn, BORDER_W, LV_PART_MAIN);
   lv_obj_set_style_border_color(btn, lv_color_hex(IDLE_BORDER), LV_PART_MAIN);
   lv_obj_set_style_bg_color(btn, lv_color_hex(ACCENT_FILL),
                             (lv_style_selector_t)LV_PART_MAIN | LV_STATE_CHECKED);
@@ -179,19 +247,22 @@ void applySelectionStyles() {
 
 void showScreen(Screen s) {
   if (s == current_) return;
+  bool forward = (int)s > (int)current_;
   current_ = s;
-  lv_scr_load_anim(s == Screen::Home ? home_.screen : vol_.screen,
-                   s == Screen::Home ? LV_SCR_LOAD_ANIM_MOVE_RIGHT
-                                     : LV_SCR_LOAD_ANIM_MOVE_LEFT,
+  ScreenWidgets *w = (s == Screen::Home) ? &home_ : (s == Screen::Volume) ? &vol_ : &modes_;
+  lv_scr_load_anim(w->screen,
+                   forward ? LV_SCR_LOAD_ANIM_MOVE_LEFT : LV_SCR_LOAD_ANIM_MOVE_RIGHT,
                    250, 0, false);
   if (screenHandler) screenHandler(s);
 }
 
 }  // namespace
 
-void build(TapHandler taps, ActionHandler actions, ScreenChangeHandler onScreenChange) {
+void build(TapHandler taps, ActionHandler actions, SceneHandler scenes,
+           ScreenChangeHandler onScreenChange) {
   tapHandler    = taps;
   actionHandler = actions;
+  sceneHandler  = scenes;
   screenHandler = onScreenChange;
 
   // ---- Screen 1: home -----------------------------------------------------------------
@@ -200,8 +271,8 @@ void build(TapHandler taps, ActionHandler actions, ScreenChangeHandler onScreenC
   lv_obj_clear_flag(home_.screen, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_event_cb(home_.screen, onGesture, LV_EVENT_GESTURE, NULL);
 
-  btnRecords  = makeButton(home_.screen, "Records", 0, -RADIUS, nullptr, LV_SYMBOL_AUDIO,
-                           onTapEvent, &tagRecords);
+  btnVinyl    = makeButton(home_.screen, "Vinyl", 0, -RADIUS, nullptr, LV_SYMBOL_AUDIO,
+                           onTapEvent, &tagVinyl);
   btnMainS1   = makeButton(home_.screen, "Main", -RADIUS, 0, &icon_era300, nullptr,
                            onTapEvent, &tagMainS1);
   btnStereoS1 = makeButton(home_.screen, "Stereo", RADIUS, 0, &icon_era100, nullptr,
@@ -246,13 +317,38 @@ void build(TapHandler taps, ActionHandler actions, ScreenChangeHandler onScreenC
   addVolumeReadout(vol_);
   addCentreLabel(vol_.screen, "VOLUME");
 
+  // ---- Screen 3: one-tap modes --------------------------------------------------------
+  modes_.screen = lv_obj_create(NULL);
+  lv_obj_set_style_bg_color(modes_.screen, lv_color_hex(BG), LV_PART_MAIN);
+  lv_obj_clear_flag(modes_.screen, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_event_cb(modes_.screen, onGesture, LV_EVENT_GESTURE, NULL);
+
+  btnRadio = makeButton(modes_.screen, "Radio", 0, -RADIUS, nullptr, LV_SYMBOL_WIFI,
+                        onSceneEvent, &tagRadio);            // 12 o'clock
+  btnHiFi  = makeButton(modes_.screen, "HiFi", -RADIUS, 0, nullptr, LV_SYMBOL_VOLUME_MAX,
+                        onSceneEvent, &tagHiFi);             //  9 o'clock
+  btnTV    = makeButton(modes_.screen, "TV", RADIUS, 0, nullptr, LV_SYMBOL_VIDEO,
+                        onSceneEvent, &tagTV);               //  3 o'clock
+  addVolumeReadout(modes_);
+  addCentreLabel(modes_.screen, "MODES");
+
+  attachSplitOverlay(btnStereoS1, splitHome_);
+  attachSplitOverlay(btnStereoS2, splitVol_);
+
   applySelectionStyles();
   lv_scr_load(home_.screen);
   current_ = Screen::Home;
 }
 
+void setSceneActive(Scene s, bool active) {
+  lv_obj_t *o = (s == Scene::HiFi) ? btnHiFi : (s == Scene::Radio) ? btnRadio : btnTV;
+  if (!o) return;
+  if (active) lv_obj_add_state(o, LV_STATE_CHECKED);
+  else        lv_obj_clear_state(o, LV_STATE_CHECKED);
+}
+
 void setVolume(int volume) {
-  for (ScreenWidgets *w : {&home_, &vol_}) {
+  for (ScreenWidgets *w : {&home_, &vol_, &modes_}) {
     if (!w->volume) continue;
     if (volume < 0) lv_label_set_text(w->volume, "--");
     else            lv_label_set_text_fmt(w->volume, "%d", volume);
@@ -280,18 +376,39 @@ void setRoomVolumes(int mainVol, int stereoVol) {
     snprintf(text, sizeof(text), "%s / %s", mainPart, stereoPart);
   }
 
-  for (ScreenWidgets *w : {&home_, &vol_}) {
+  for (ScreenWidgets *w : {&home_, &vol_, &modes_}) {
     if (w->rooms) lv_label_set_text(w->rooms, text);
   }
 }
 
 void setActive(Button b, bool active) {
-  lv_obj_t *o = (b == Button::Records) ? btnRecords
-              : (b == Button::Main)    ? btnMainS1
-                                       : btnStereoS1;
+  lv_obj_t *o = (b == Button::Vinyl) ? btnVinyl
+              : (b == Button::Main)  ? btnMainS1
+                                     : btnStereoS1;
   if (!o) return;
   if (active) lv_obj_add_state(o, LV_STATE_CHECKED);
   else        lv_obj_clear_state(o, LV_STATE_CHECKED);
+}
+
+// Split view for the stereo pair. While separated the two speakers are independent, so a
+// single on/off button cannot describe them: the left half keeps the idle face and the
+// right half shows whether the right speaker is playing (the TV setup).
+void setStereoSplit(bool split, bool rightActive) {
+  for (SplitOverlay *ov : {&splitHome_, &splitVol_}) {
+    if (!ov->rightHalf) continue;
+    if (!split) {
+      lv_obj_add_flag(ov->rightHalf, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_add_flag(ov->divider, LV_OBJ_FLAG_HIDDEN);
+      continue;
+    }
+    // Blue only when the right speaker is actually producing sound; otherwise both halves
+    // stay grey and only the divider shows, so the button never claims silent audio.
+    lv_obj_set_style_bg_color(ov->rightHalf,
+                              lv_color_hex(rightActive ? ACCENT_FILL : IDLE_FILL),
+                              LV_PART_MAIN);
+    lv_obj_clear_flag(ov->rightHalf, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(ov->divider, LV_OBJ_FLAG_HIDDEN);
+  }
 }
 
 void setStatus(const char *text) {
