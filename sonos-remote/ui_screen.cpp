@@ -53,7 +53,10 @@ void setArcLayers(void *screenWidgets, int32_t value);
 const int ARC_LAYERS      = 6;
 const int ARC_LAYER_WIDTH = 6;
 const int ARC_LAYER_STEP  = 10;    // diameter step; radius step is half of this
-const lv_opa_t ARC_LAYER_OPA[ARC_LAYERS] = {255, 205, 155, 110, 70, 35};
+// Gamma-shaped, NOT linear. Perceived brightness follows roughly alpha^0.43, so an evenly
+// spaced alpha ramp looks top-heavy: the outer layers read as one solid band and then the
+// fade falls off a cliff. Falling faster early gives visually even steps.
+const lv_opa_t ARC_LAYER_OPA[ARC_LAYERS] = {255, 170, 105, 60, 30, 12};
 
 // Per-screen widgets that need updating from outside.
 struct ScreenWidgets {

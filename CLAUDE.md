@@ -324,6 +324,10 @@ there. On reconnect the topology is re-resolved rather than trusting the cached 
   - **LVGL 8.3 has NO radial gradient for arc strokes** (`bg_grad_dir` is linear and applies
     to backgrounds). The fade is six concentric arcs with a falling opacity ramp, each 6 px
     wide stepping inward 5 px so they OVERLAP by 1 px — without the overlap the seams show.
+  - **The ramp is GAMMA-shaped, not linear** (`255, 170, 105, 60, 30, 12`). Perceived
+    brightness follows roughly `alpha^0.43`, so evenly spaced alpha reads as top-heavy: the
+    outer layers merge into one solid band and the fade then falls off a cliff. Do not
+    "tidy" this into an even ramp.
   - **One animation drives all six layers** via a custom exec callback. Six independent
     animations would race and the layers could visibly tear apart during a fast spin.
   - The busy sweep stays thin and sits at the ring's outer edge.
