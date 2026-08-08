@@ -875,6 +875,12 @@ void loop() {
     else if (playing || idle < DISPLAY_OFF_MS)    want = panel::Level::Dim;
     else                                          want = panel::Level::Off;
 
+    // Going idle also returns to the home screen, so the device never wakes showing a
+    // sub-screen you left open. Done BEFORE dimming so the slide starts at full brightness.
+    if (want == panel::Level::Dim && panel::level() == panel::Level::Full) {
+      ui::goHome();
+    }
+
     if (want != panel::level()) {
       Serial.printf("[ui] display -> %s (idle %lus, %s)\n",
                     want == panel::Level::Full ? "full"

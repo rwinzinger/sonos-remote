@@ -13,7 +13,10 @@ const int BTN_SIZE  = 110;
 // Single source of truth: the same value is used for the border style AND for the maths
 // that positions the split overlay, which must line up with the button's true centre.
 const int BORDER_W  = 3;
-const int VOL_SIZE  = 124;   // slightly larger than a button: it is the primary readout
+// Same size as a button, deliberately: the four circles sit on one ring and any size
+// difference reads as a mistake rather than emphasis. Derived from BTN_SIZE so they cannot
+// drift apart.
+const int VOL_SIZE  = BTN_SIZE;
 
 // The volume circle's outline and the layout ring are the same stroke, deliberately: they
 // read as one construction line. Shared constants so they cannot drift apart.
@@ -33,10 +36,22 @@ const uint32_t BTN_TEXT    = 0x14141A;
 // mean different things (selected-for-editing vs speaker-is-on).
 const uint32_t SELECT_COLOR = 0xF08080;
 
-const uint32_t RING_ACCENT = 0x86C8F5;
+// DERIVED from ACCENT_FILL, not a second copy of the same literal: the volume ring and an
+// active button face are meant to be the same blue, and two independent constants holding
+// 0x86C8F5 would silently diverge the first time one is tweaked. It keeps its own name
+// because the ring sits on the near-black background while the button face does not, so a
+// deliberate divergence stays possible — it just has to be explicit.
+//
+// Only arc layer 0 shows this pure; the rest are the same hue at falling opacity. It matches
+// the TOP of the active button's gradient, which darkens to ACCENT_FILL_2.
+const uint32_t RING_ACCENT = ACCENT_FILL;
 const uint32_t RING_TRACK  = 0x22222A;
 const uint32_t TEXT_BRIGHT = 0xF0F0F5;
 const uint32_t TEXT_DIM    = 0x8A8A95;
+
+// Now-playing line. Width is capped because the Main and Stereo buttons close in to +/-95 px.
+#define NP_FONT (&lv_font_montserrat_16)
+const int NP_WIDTH  = 180;
 const uint32_t BG          = 0x14141A;   // top of the background gradient
 const uint32_t BG_DEEP     = 0x08080B;   // bottom — subtle depth without visible banding
 
@@ -47,7 +62,7 @@ const uint32_t ACCENT_FILL_2 = 0x63A9DC;
 const uint32_t PRESS_FILL    = 0x7E7E85;
 
 const int RING_SIZE  = 460;
-const int RING_WIDTH = 8;      // the busy sweep stays thin, at the ring's outer edge
+const int RING_WIDTH = 8;      // legacy single-width bezel; layers below supersede it
 
 struct ScreenWidgets;
 void setArcLayers(void *screenWidgets, int32_t value);
@@ -264,9 +279,56 @@ lv_obj_t *makeButton(lv_obj_t *parent, const char *text, int dx, int dy,
   return btn;
 }
 
-// The bezel ring. A round display should show volume as a ring, not only as digits — and
-// the busy indicator reuses the SAME geometry and colours, so it reads as one ring changing
-// behaviour rather than two competing elements.
+// Animation target: sets every layer of one screen's ring from a single animation.
+void setArcLayers(void *screenWidgets, int32_t value) {
+  ScreenWidgets *w = (ScreenWidgets *)screenWidgets;
+  for (int i = 0; i < ARC_LAYERS; i++) {
+    if (w->arcLayers[i]) lv_arc_set_value(w->arcLayers[i], value);
+  }
+}
+
+// A faint circle through the centres of the four elements at 12/9/3/6, drawn behind them
+// so they read as beads on one ring rather than four independent blobs. The busy sweep
+// lives here too — see below.
+void addLayoutRing(ScreenWidgets &w) {
+  lv_obj_t *ring = lv_obj_create(w.screen);
+  // + RING_LINE_W, not just RADIUS*2: LVGL draws the border INWARD from the bounding box,
+  // so a 2*RADIUS box puts the stroke's centreline at RADIUS - w/2 and the ring runs
+  // visibly inside the button centres. Growing the box by one stroke width lands the
+  // centreline exactly on RADIUS.
+  lv_obj_set_size(ring, RADIUS * 2 + RING_LINE_W, RADIUS * 2 + RING_LINE_W);
+  lv_obj_center(ring);
+  lv_obj_set_style_radius(ring, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(ring, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(ring, RING_LINE_W, LV_PART_MAIN);
+  lv_obj_set_style_border_color(ring, lv_color_hex(RING_LINE_COLOR), LV_PART_MAIN);
+  lv_obj_set_style_pad_all(ring, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(ring, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(ring, LV_OBJ_FLAG_SCROLLABLE);
+
+  // The busy sweep runs ON the layout ring rather than the outer bezel, which belongs to
+  // the volume. Its track is transparent so the static ring shows through and only the
+  // moving segment is drawn — it reads as a light travelling around the construction line.
+  w.spinner = lv_spinner_create(w.screen, 1100, 70);
+  lv_obj_set_size(w.spinner, RADIUS * 2 + RING_LINE_W, RADIUS * 2 + RING_LINE_W);
+  lv_obj_center(w.spinner);
+  lv_obj_set_style_arc_width(w.spinner, RING_LINE_W, LV_PART_MAIN);
+  lv_obj_set_style_arc_width(w.spinner, RING_LINE_W, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_opa(w.spinner, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_arc_color(w.spinner, lv_color_hex(RING_ACCENT), LV_PART_INDICATOR);
+  lv_obj_clear_flag(w.spinner, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(w.spinner, LV_OBJ_FLAG_HIDDEN);
+
+  // Z-order: spinner to the back first, then the ring, so both land BELOW the buttons
+  // (created earlier) while the sweep still draws on top of the static ring.
+  lv_obj_move_background(w.spinner);
+  lv_obj_move_background(ring);
+}
+
+
+// The outer bezel ring: volume only. The busy sweep used to share this band and had to
+// hide the volume while working — it now lives on the inner layout ring instead, so both
+// can be shown at once.
 void addBezelRing(ScreenWidgets &w) {
   for (int i = 0; i < ARC_LAYERS; i++) {
     lv_obj_t *a = lv_arc_create(w.screen);
@@ -290,43 +352,6 @@ void addBezelRing(ScreenWidgets &w) {
     w.arcLayers[i] = a;
   }
 
-  w.spinner = lv_spinner_create(w.screen, 1100, 70);
-  lv_obj_set_size(w.spinner, RING_SIZE, RING_SIZE);
-  lv_obj_center(w.spinner);
-  lv_obj_set_style_arc_width(w.spinner, RING_WIDTH, LV_PART_MAIN);
-  lv_obj_set_style_arc_width(w.spinner, RING_WIDTH, LV_PART_INDICATOR);
-  lv_obj_set_style_arc_color(w.spinner, lv_color_hex(RING_TRACK), LV_PART_MAIN);
-  lv_obj_set_style_arc_color(w.spinner, lv_color_hex(RING_ACCENT), LV_PART_INDICATOR);
-  lv_obj_clear_flag(w.spinner, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_flag(w.spinner, LV_OBJ_FLAG_HIDDEN);
-}
-
-// A faint circle through the centres of the four elements at 12/9/3/6, drawn behind them
-// so they read as beads on one ring rather than four independent blobs.
-void addLayoutRing(ScreenWidgets &w) {
-  lv_obj_t *ring = lv_obj_create(w.screen);
-  // + RING_LINE_W, not just RADIUS*2: LVGL draws the border INWARD from the bounding box,
-  // so a 2*RADIUS box puts the stroke's centreline at RADIUS - w/2 and the ring runs
-  // visibly inside the button centres. Growing the box by one stroke width lands the
-  // centreline exactly on RADIUS.
-  lv_obj_set_size(ring, RADIUS * 2 + RING_LINE_W, RADIUS * 2 + RING_LINE_W);
-  lv_obj_center(ring);
-  lv_obj_set_style_radius(ring, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(ring, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_style_border_width(ring, RING_LINE_W, LV_PART_MAIN);
-  lv_obj_set_style_border_color(ring, lv_color_hex(RING_LINE_COLOR), LV_PART_MAIN);
-  lv_obj_set_style_pad_all(ring, 0, LV_PART_MAIN);
-  lv_obj_clear_flag(ring, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_clear_flag(ring, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_move_background(ring);
-}
-
-// Animation target: sets every layer of one screen's ring from a single animation.
-void setArcLayers(void *screenWidgets, int32_t value) {
-  ScreenWidgets *w = (ScreenWidgets *)screenWidgets;
-  for (int i = 0; i < ARC_LAYERS; i++) {
-    if (w->arcLayers[i]) lv_arc_set_value(w->arcLayers[i], value);
-  }
 }
 
 // Which of the three screens you are on. Without this the swipe chain is invisible.
@@ -353,9 +378,9 @@ void addPageDots(ScreenWidgets &w, int activeIndex) {
 void addNowPlaying(ScreenWidgets &w) {
   w.nowPlaying = lv_label_create(w.screen);
   lv_label_set_long_mode(w.nowPlaying, LV_LABEL_LONG_SCROLL_CIRCULAR);
-  lv_obj_set_width(w.nowPlaying, 180);
+  lv_obj_set_width(w.nowPlaying, NP_WIDTH);
   lv_label_set_text(w.nowPlaying, "");
-  lv_obj_set_style_text_font(w.nowPlaying, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_obj_set_style_text_font(w.nowPlaying, NP_FONT, LV_PART_MAIN);
   lv_obj_set_style_text_color(w.nowPlaying, lv_color_hex(TEXT_DIM), LV_PART_MAIN);
   lv_obj_set_style_text_align(w.nowPlaying, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_obj_align(w.nowPlaying, LV_ALIGN_CENTER, 0, 12);
@@ -379,9 +404,11 @@ void addVolumeReadout(ScreenWidgets &w) {
 
   w.volume = lv_label_create(circle);
   lv_label_set_text(w.volume, "--");
-  lv_obj_set_style_text_font(w.volume, &lv_font_montserrat_48, LV_PART_MAIN);
+  // 40 rather than 48: inside a 110 px circle the larger size left almost no margin around
+  // a three-digit value, and the circle now matches the buttons so it cannot grow instead.
+  lv_obj_set_style_text_font(w.volume, &lv_font_montserrat_40, LV_PART_MAIN);
   lv_obj_set_style_text_color(w.volume, lv_color_hex(TEXT_BRIGHT), LV_PART_MAIN);
-  lv_obj_align(w.volume, LV_ALIGN_CENTER, 0, -12);
+  lv_obj_align(w.volume, LV_ALIGN_CENTER, 0, -10);
 
   w.rooms = lv_label_create(circle);
   // Recolour markup lets ONE side of "13 / 25" turn red without splitting it into
@@ -617,12 +644,17 @@ void setStereoSplit(bool split, bool rightActive) {
 
 // Empty text simply clears the line; the wordmark stays put on every screen.
 void setNowPlaying(const char *text) {
-  // Trailing gap so the circular scroll has an obvious break instead of the end running
-  // straight into the start. Padding is added HERE rather than in the sonos module: it is
-  // a display concern, and the module should keep returning clean metadata.
-  static char padded[128];
+  // Four spaces each side. Padding is added HERE, not in the sonos module: it is a display
+  // concern and the module should keep returning clean metadata.
+  //
+  // Symmetric on purpose. Short text stays visually CENTRED (equal padding cancels out) and
+  // simply does not scroll, while long text overflows and scrolls — and at the wrap the
+  // trailing four meet the leading four, giving an eight-space break without a lopsided
+  // offset. An earlier version measured the text and padded it enough to force even short
+  // strings to scroll; that was consistent but left a long blank sweep after a short name.
+  static char padded[160];
   if (text && *text) {
-    snprintf(padded, sizeof(padded), "%s        ", text);
+    snprintf(padded, sizeof(padded), "    %s    ", text);
   } else {
     padded[0] = '\0';
   }
@@ -645,12 +677,9 @@ void setBusy(bool busy) {
   // Swap the static volume ring for the sweeping one. Same radius, width and colour, so it
   // reads as the ring starting to move rather than a second element appearing.
   for (ScreenWidgets *w : {&home_, &vol_, &modes_}) {
-    if (!w->spinner || !w->arcLayers[0]) continue;
-    for (int i = 0; i < ARC_LAYERS; i++) {
-      if (!w->arcLayers[i]) continue;
-      if (busy) lv_obj_add_flag(w->arcLayers[i], LV_OBJ_FLAG_HIDDEN);
-      else      lv_obj_clear_flag(w->arcLayers[i], LV_OBJ_FLAG_HIDDEN);
-    }
+    if (!w->spinner) continue;
+    // The volume ring STAYS VISIBLE while busy: the sweep now lives on the inner layout
+    // ring, so the two no longer compete for the same band.
     if (busy) lv_obj_clear_flag(w->spinner, LV_OBJ_FLAG_HIDDEN);
     else      lv_obj_add_flag(w->spinner, LV_OBJ_FLAG_HIDDEN);
   }
@@ -660,6 +689,12 @@ void setSelection(Selection s) {
   selection_ = s;
   applySelectionStyles();
   setRoomVolumes(lastMainVol_, lastStereoVol_);   // re-tint the breakdown
+}
+
+void goHome() {
+  // showScreen() picks MOVE_RIGHT for a backwards jump, so this is exactly the swipe-back
+  // animation — including from Modes, which slides two screens in one motion.
+  showScreen(Screen::Home);
 }
 
 Selection selection()    { return selection_; }

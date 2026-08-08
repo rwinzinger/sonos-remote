@@ -64,4 +64,8 @@ Selection selection();
 
 Screen currentScreen();
 
+// Return to the home screen programmatically, using the same slide as a swipe back. No-op
+// if already there. Used when the display goes idle, so it never wakes on a sub-screen.
+void goHome();
+
 }  // namespace ui

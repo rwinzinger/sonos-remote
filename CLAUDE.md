@@ -309,8 +309,19 @@ volume figures):
   U+00B7, en/em dashes, ellipsis and typographic quotes render as placeholder boxes. The
   artist separator is a plain " - " for this reason.
 - The label is only re-set when the text CHANGES, or every refresh restarts the scroll
-  animation and a long title never reaches its end. Trailing spaces give the circular scroll
-  a visible break; that padding lives in the UI layer, not in the sonos module.
+  animation and a long title never reaches its end. Padding lives in the UI layer, not in
+  the sonos module.
+- **Padding is FOUR SPACES EACH SIDE**, not eight trailing. Symmetric keeps short text
+  visually centred (the padding cancels out) while long text still gets an eight-space break
+  at the wrap, where trailing meets leading. A version that MEASURED the text and padded it
+  enough to force even short strings to scroll was tried and rejected: consistent motion, but
+  a short station name then swept across a long blank run.
+- **Reject URI-shaped AND promo-shaped values.** Radio puts the stream URL in `dc:title`
+  until the station resolves, and rotates `r:streamContent` between the track and strings
+  like "www.radioeins.de" — which made the line flap. A bare host has no spaces and a short
+  alphabetic suffix after a dot; real track text almost always contains a space.
+- Preference order is `r:streamContent` (what is playing NOW) -> `dc:title` (station name)
+  -> source label. Getting this backwards shows the station name over a live track.
 
 **WiFi is supervised in `loop()`** — `connectWiFi()` runs once at boot, so before this a
 router reboot left the device dead until power-cycled. `setAutoReconnect(true)` plus a 5 s

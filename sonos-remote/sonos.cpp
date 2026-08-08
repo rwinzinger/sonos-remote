@@ -798,6 +798,33 @@ bool isBluetoothActive(const char *room, bool &activeOut) {
   return true;
 }
 
+// Radio streams often carry the stream URL in dc:title until Sonos resolves the station,
+// and TrackURI/<res> always hold it. Anything URI-shaped is unusable as a display name.
+static bool looksLikeUri(const String &v) {
+  return v.indexOf("://") >= 0 || v.startsWith("x-");
+}
+
+// Radio stations rotate r:streamContent between the actual track and promo strings like
+// "www.radioeins.de", so the display flaps between them. A bare host has NO SPACES and a
+// short alphabetic suffix after a dot; real track text almost always contains a space.
+// Rejecting these makes the line settle on the station name instead of cycling.
+static bool looksLikePromo(const String &v) {
+  if (v.indexOf(' ') >= 0) return false;          // has a space: treat as real text
+  if (v.indexOf("www.") >= 0) return true;
+  int dot = v.lastIndexOf('.');
+  if (dot <= 0 || dot >= (int)v.length() - 1) return false;
+  String tld = v.substring(dot + 1);
+  if (tld.length() < 2 || tld.length() > 4) return false;
+  for (unsigned i = 0; i < tld.length(); i++) {
+    if (!isAlpha(tld[i])) return false;
+  }
+  return true;                                     // e.g. "radioeins.de"
+}
+
+static bool usableText(const String &v) {
+  return v.length() && !looksLikeUri(v) && !looksLikePromo(v);
+}
+
 bool getNowPlaying(const char *room, char *out, size_t outLen) {
   if (!out || outLen == 0) return false;
   out[0] = '\0';
@@ -813,11 +840,16 @@ bool getNowPlaying(const char *room, char *out, size_t outLen) {
   String pos = soapCall(z->ip, PATH_AVTRANSPORT, SVC_AVTRANSPORT, "GetPositionInfo");
   if (!pos.isEmpty()) {
     String meta = unescapeXml(between(pos, "<TrackMetaData>", "</TrackMetaData>"));
-    title  = between(meta, "<dc:title>", "</dc:title>");
     artist = between(meta, "<dc:creator>", "</dc:creator>");
-    // Radio streams put "Artist - Title" here instead of in dc:title.
+
+    // Preference order matters. streamContent carries what a station is playing RIGHT NOW,
+    // which beats the station's own name; dc:title is next; and either may legitimately be
+    // absent. Anything URI-shaped is discarded rather than shown.
     String stream = between(meta, "<r:streamContent>", "</r:streamContent>");
-    if (title.isEmpty() && stream.length()) title = stream;
+    String dcTitle = between(meta, "<dc:title>", "</dc:title>");
+    if (usableText(stream))       title = stream;
+    else if (usableText(dcTitle))  title = dcTitle;
+    if (!usableText(artist)) artist = "";
   }
 
   if (title.isEmpty()) {
@@ -827,10 +859,11 @@ bool getNowPlaying(const char *room, char *out, size_t outLen) {
     String umeta = unescapeXml(between(mi, "<CurrentURIMetaData>", "</CurrentURIMetaData>"));
     String label = between(umeta, "<dc:title>", "</dc:title>");
 
-    if (uri.startsWith("x-rincon-stream:"))      title = "Plattenspieler";
-    else if (uri.indexOf("bluetooth") >= 0)      title = "Bluetooth";
-    else if (label.length())                     title = label;
-    else if (uri.startsWith("x-rincon-mp3radio")) title = "Radio";
+    if (uri.startsWith("x-rincon-stream:"))            title = "Plattenspieler";
+    else if (uri.indexOf("bluetooth") >= 0)            title = "Bluetooth";
+    else if (usableText(label))                        title = label;
+    else if (uri.startsWith("x-rincon-mp3radio"))      title = "Radio";
+    else if (uri.startsWith("x-sonos-vli"))            title = "Line-in";
   }
   if (title.isEmpty()) return false;
 
