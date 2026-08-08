@@ -41,14 +41,26 @@ const uint32_t ACCENT_FILL_2 = 0x63A9DC;
 const uint32_t PRESS_FILL    = 0x7E7E85;
 
 const int RING_SIZE  = 460;
-const int RING_WIDTH = 8;
+const int RING_WIDTH = 8;      // the busy sweep stays thin, at the ring's outer edge
+
+struct ScreenWidgets;
+void setArcLayers(void *screenWidgets, int32_t value);
+
+// A wide ring that fades inward. LVGL 8.3 has NO radial gradient for arcs — bg_grad_dir is
+// linear and applies to backgrounds, not arc strokes — so the fade is built from concentric
+// arcs with a falling opacity ramp. Six layers of 6 px stepping inward by 5 px overlap
+// slightly, which hides the seams; the band spans radius 199..230, i.e. ~32 px.
+const int ARC_LAYERS      = 6;
+const int ARC_LAYER_WIDTH = 6;
+const int ARC_LAYER_STEP  = 10;    // diameter step; radius step is half of this
+const lv_opa_t ARC_LAYER_OPA[ARC_LAYERS] = {255, 205, 155, 110, 70, 35};
 
 // Per-screen widgets that need updating from outside.
 struct ScreenWidgets {
   lv_obj_t *screen  = nullptr;
   lv_obj_t *volume  = nullptr;
   lv_obj_t *rooms   = nullptr;
-  lv_obj_t *arc     = nullptr;        // volume as a bezel ring
+  lv_obj_t *arcLayers[6] = {nullptr};  // volume ring, outermost first
   lv_obj_t *spinner = nullptr;        // same geometry, shown instead while busy
   lv_obj_t *dots[3] = {nullptr, nullptr, nullptr};
   lv_obj_t *nowPlaying = nullptr;
@@ -247,20 +259,27 @@ lv_obj_t *makeButton(lv_obj_t *parent, const char *text, int dx, int dy,
 // the busy indicator reuses the SAME geometry and colours, so it reads as one ring changing
 // behaviour rather than two competing elements.
 void addBezelRing(ScreenWidgets &w) {
-  w.arc = lv_arc_create(w.screen);
-  lv_obj_set_size(w.arc, RING_SIZE, RING_SIZE);
-  lv_obj_center(w.arc);
-  lv_arc_set_range(w.arc, 0, 100);
-  lv_arc_set_value(w.arc, 0);
-  // Gap at the bottom, gauge style: the numerals live down there.
-  lv_arc_set_bg_angles(w.arc, 135, 45);
-  lv_arc_set_rotation(w.arc, 0);
-  lv_obj_remove_style(w.arc, NULL, LV_PART_KNOB);      // display only, not draggable
-  lv_obj_clear_flag(w.arc, LV_OBJ_FLAG_CLICKABLE);     // must never eat taps or swipes
-  lv_obj_set_style_arc_width(w.arc, RING_WIDTH, LV_PART_MAIN);
-  lv_obj_set_style_arc_width(w.arc, RING_WIDTH, LV_PART_INDICATOR);
-  lv_obj_set_style_arc_color(w.arc, lv_color_hex(RING_TRACK), LV_PART_MAIN);
-  lv_obj_set_style_arc_color(w.arc, lv_color_hex(RING_ACCENT), LV_PART_INDICATOR);
+  for (int i = 0; i < ARC_LAYERS; i++) {
+    lv_obj_t *a = lv_arc_create(w.screen);
+    int size = RING_SIZE - i * ARC_LAYER_STEP;
+    lv_obj_set_size(a, size, size);
+    lv_obj_center(a);
+    lv_arc_set_range(a, 0, 100);
+    lv_arc_set_value(a, 0);
+    // Gap at the bottom, gauge style: the numerals live down there.
+    lv_arc_set_bg_angles(a, 135, 45);
+    lv_arc_set_rotation(a, 0);
+    lv_obj_remove_style(a, NULL, LV_PART_KNOB);      // display only, not draggable
+    lv_obj_clear_flag(a, LV_OBJ_FLAG_CLICKABLE);     // must never eat taps or swipes
+    lv_obj_set_style_arc_width(a, ARC_LAYER_WIDTH, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(a, ARC_LAYER_WIDTH, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(a, lv_color_hex(RING_TRACK), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(a, lv_color_hex(RING_ACCENT), LV_PART_INDICATOR);
+    // The fade: full opacity at the rim, almost nothing by the innermost layer.
+    lv_obj_set_style_arc_opa(a, ARC_LAYER_OPA[i], LV_PART_INDICATOR);
+    lv_obj_set_style_arc_opa(a, (lv_opa_t)(ARC_LAYER_OPA[i] / 3), LV_PART_MAIN);
+    w.arcLayers[i] = a;
+  }
 
   w.spinner = lv_spinner_create(w.screen, 1100, 70);
   lv_obj_set_size(w.spinner, RING_SIZE, RING_SIZE);
@@ -271,6 +290,14 @@ void addBezelRing(ScreenWidgets &w) {
   lv_obj_set_style_arc_color(w.spinner, lv_color_hex(RING_ACCENT), LV_PART_INDICATOR);
   lv_obj_clear_flag(w.spinner, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_flag(w.spinner, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Animation target: sets every layer of one screen's ring from a single animation.
+void setArcLayers(void *screenWidgets, int32_t value) {
+  ScreenWidgets *w = (ScreenWidgets *)screenWidgets;
+  for (int i = 0; i < ARC_LAYERS; i++) {
+    if (w->arcLayers[i]) lv_arc_set_value(w->arcLayers[i], value);
+  }
 }
 
 // Which of the three screens you are on. Without this the swipe chain is invisible.
@@ -467,16 +494,16 @@ void setVolume(int volume) {
       if (volume < 0) lv_label_set_text(w->volume, "--");
       else            lv_label_set_text_fmt(w->volume, "%d", volume);
     }
-    // Glide rather than step. Any running animation on this arc is deleted first, so a
-    // fast spin re-aims at the newest value instead of queueing a backlog that would keep
-    // moving after the knob stops.
-    if (w->arc && volume >= 0) {
-      lv_anim_del(w->arc, (lv_anim_exec_xcb_t)lv_arc_set_value);
+    // Glide rather than step. ONE animation drives all six layers via setArcLayers, rather
+    // than six animations racing each other. Any running one is deleted first, so a fast
+    // spin re-aims at the newest value instead of queueing a backlog.
+    if (w->arcLayers[0] && volume >= 0) {
+      lv_anim_del(w, setArcLayers);
       lv_anim_t a;
       lv_anim_init(&a);
-      lv_anim_set_var(&a, w->arc);
-      lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_arc_set_value);
-      lv_anim_set_values(&a, lv_arc_get_value(w->arc), volume);
+      lv_anim_set_var(&a, w);
+      lv_anim_set_exec_cb(&a, setArcLayers);
+      lv_anim_set_values(&a, lv_arc_get_value(w->arcLayers[0]), volume);
       lv_anim_set_time(&a, 120);
       lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
       lv_anim_start(&a);
@@ -570,14 +597,14 @@ void setBusy(bool busy) {
   // Swap the static volume ring for the sweeping one. Same radius, width and colour, so it
   // reads as the ring starting to move rather than a second element appearing.
   for (ScreenWidgets *w : {&home_, &vol_, &modes_}) {
-    if (!w->spinner || !w->arc) continue;
-    if (busy) {
-      lv_obj_add_flag(w->arc, LV_OBJ_FLAG_HIDDEN);
-      lv_obj_clear_flag(w->spinner, LV_OBJ_FLAG_HIDDEN);
-    } else {
-      lv_obj_clear_flag(w->arc, LV_OBJ_FLAG_HIDDEN);
-      lv_obj_add_flag(w->spinner, LV_OBJ_FLAG_HIDDEN);
+    if (!w->spinner || !w->arcLayers[0]) continue;
+    for (int i = 0; i < ARC_LAYERS; i++) {
+      if (!w->arcLayers[i]) continue;
+      if (busy) lv_obj_add_flag(w->arcLayers[i], LV_OBJ_FLAG_HIDDEN);
+      else      lv_obj_clear_flag(w->arcLayers[i], LV_OBJ_FLAG_HIDDEN);
     }
+    if (busy) lv_obj_clear_flag(w->spinner, LV_OBJ_FLAG_HIDDEN);
+    else      lv_obj_add_flag(w->spinner, LV_OBJ_FLAG_HIDDEN);
   }
 }
 

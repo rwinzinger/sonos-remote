@@ -318,10 +318,15 @@ check and a 20 s retry; `WiFi.begin()` is asynchronous, which is what makes retr
 there. On reconnect the topology is re-resolved rather than trusting the cached coordinator.
 
 **Visual treatment (added after the functional safepoint):**
-- **The bezel ring is the volume**, drawn as a 270° arc with a gap at the bottom for the
-  numerals. The busy indicator REUSES the same geometry and colours, so the ring simply
-  starts sweeping instead of a second element appearing. Present on ALL three screens —
-  the old spinner existed only on screen 1, so mode taps gave no feedback.
+- **The bezel ring is the volume**, a 270° arc with a gap at the bottom for the numerals,
+  ~31 px wide and fading from full opacity at the rim to 13% inward. Present on ALL three
+  screens — the old spinner existed only on screen 1, so mode taps gave no feedback.
+  - **LVGL 8.3 has NO radial gradient for arc strokes** (`bg_grad_dir` is linear and applies
+    to backgrounds). The fade is six concentric arcs with a falling opacity ramp, each 6 px
+    wide stepping inward 5 px so they OVERLAP by 1 px — without the overlap the seams show.
+  - **One animation drives all six layers** via a custom exec callback. Six independent
+    animations would race and the layers could visibly tear apart during a fast spin.
+  - The busy sweep stays thin and sits at the ring's outer edge.
 - **Page dots** at the bottom; without them the three-screen swipe chain is invisible.
 - **Gradients are short-range and low-contrast on purpose.** 16-bit colour bands visibly
   over a long ramp. `LV_DITHER_GRADIENT` exists if more range is ever wanted, at a RAM cost.
