@@ -13,6 +13,12 @@ const int BTN_SIZE  = 110;
 // Single source of truth: the same value is used for the border style AND for the maths
 // that positions the split overlay, which must line up with the button's true centre.
 const int BORDER_W  = 3;
+const int VOL_SIZE  = 124;   // slightly larger than a button: it is the primary readout
+
+// The volume circle's outline and the layout ring are the same stroke, deliberately: they
+// read as one construction line. Shared constants so they cannot drift apart.
+const uint32_t RING_LINE_COLOR = 0x4A4A54;
+const int      RING_LINE_W     = BORDER_W;
 
 // Active state is carried by HUE, not brightness — grey-on-grey was too subtle to read at a
 // glance. Faces stay light because the Sonos device icons are near-black and cannot be
@@ -295,6 +301,26 @@ void addBezelRing(ScreenWidgets &w) {
   lv_obj_add_flag(w.spinner, LV_OBJ_FLAG_HIDDEN);
 }
 
+// A faint circle through the centres of the four elements at 12/9/3/6, drawn behind them
+// so they read as beads on one ring rather than four independent blobs.
+void addLayoutRing(ScreenWidgets &w) {
+  lv_obj_t *ring = lv_obj_create(w.screen);
+  // + RING_LINE_W, not just RADIUS*2: LVGL draws the border INWARD from the bounding box,
+  // so a 2*RADIUS box puts the stroke's centreline at RADIUS - w/2 and the ring runs
+  // visibly inside the button centres. Growing the box by one stroke width lands the
+  // centreline exactly on RADIUS.
+  lv_obj_set_size(ring, RADIUS * 2 + RING_LINE_W, RADIUS * 2 + RING_LINE_W);
+  lv_obj_center(ring);
+  lv_obj_set_style_radius(ring, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(ring, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(ring, RING_LINE_W, LV_PART_MAIN);
+  lv_obj_set_style_border_color(ring, lv_color_hex(RING_LINE_COLOR), LV_PART_MAIN);
+  lv_obj_set_style_pad_all(ring, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(ring, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(ring, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_move_background(ring);
+}
+
 // Animation target: sets every layer of one screen's ring from a single animation.
 void setArcLayers(void *screenWidgets, int32_t value) {
   ScreenWidgets *w = (ScreenWidgets *)screenWidgets;
@@ -308,7 +334,7 @@ void addPageDots(ScreenWidgets &w, int activeIndex) {
   for (int i = 0; i < 3; i++) {
     lv_obj_t *d = lv_obj_create(w.screen);
     lv_obj_set_size(d, 8, 8);
-    lv_obj_align(d, LV_ALIGN_CENTER, (i - 1) * 18, RADIUS + 55);
+    lv_obj_align(d, LV_ALIGN_CENTER, (i - 1) * 18, 40);
     lv_obj_set_style_radius(d, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_border_width(d, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(d, 0, LV_PART_MAIN);
@@ -335,22 +361,36 @@ void addNowPlaying(ScreenWidgets &w) {
   lv_obj_align(w.nowPlaying, LV_ALIGN_CENTER, 0, 12);
 }
 
-// Volume readout shared by both screens.
+// Volume lives in its own circle at 6 o'clock, completing the 12/9/3/6 ring. Outline only,
+// not a filled face like the buttons: it is a READOUT, and a face identical to the buttons
+// would imply it can be tapped. Both figures live inside it — group large, per-room small.
 void addVolumeReadout(ScreenWidgets &w) {
-  w.volume = lv_label_create(w.screen);
+  lv_obj_t *circle = lv_obj_create(w.screen);
+  lv_obj_set_size(circle, VOL_SIZE, VOL_SIZE);
+  lv_obj_align(circle, LV_ALIGN_CENTER, 0, RADIUS);
+  lv_obj_set_style_radius(circle, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(circle, lv_color_hex(BG), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(circle, 160, LV_PART_MAIN);
+  lv_obj_set_style_border_width(circle, RING_LINE_W, LV_PART_MAIN);
+  lv_obj_set_style_border_color(circle, lv_color_hex(RING_LINE_COLOR), LV_PART_MAIN);
+  lv_obj_set_style_pad_all(circle, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(circle, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(circle, LV_OBJ_FLAG_SCROLLABLE);
+
+  w.volume = lv_label_create(circle);
   lv_label_set_text(w.volume, "--");
   lv_obj_set_style_text_font(w.volume, &lv_font_montserrat_48, LV_PART_MAIN);
   lv_obj_set_style_text_color(w.volume, lv_color_hex(TEXT_BRIGHT), LV_PART_MAIN);
-  lv_obj_align(w.volume, LV_ALIGN_CENTER, 0, RADIUS - 10);
+  lv_obj_align(w.volume, LV_ALIGN_CENTER, 0, -12);
 
-  w.rooms = lv_label_create(w.screen);
+  w.rooms = lv_label_create(circle);
   // Recolour markup lets ONE side of "13 / 25" turn red without splitting it into
   // separate labels.
   lv_label_set_recolor(w.rooms, true);
   lv_label_set_text(w.rooms, "");
   lv_obj_set_style_text_font(w.rooms, &lv_font_montserrat_16, LV_PART_MAIN);
   lv_obj_set_style_text_color(w.rooms, lv_color_hex(TEXT_DIM), LV_PART_MAIN);
-  lv_obj_align(w.rooms, LV_ALIGN_CENTER, 0, RADIUS + 26);
+  lv_obj_align(w.rooms, LV_ALIGN_CENTER, 0, 26);
 }
 
 lv_obj_t *addCentreLabel(lv_obj_t *parent, const char *text) {
@@ -418,6 +458,7 @@ void build(TapHandler taps, ActionHandler actions, SceneHandler scenes,
                            onTapEvent, &tagMainS1);
   btnStereoS1 = makeButton(home_.screen, "Stereo", RADIUS, 0, &icon_era100, nullptr,
                            onTapEvent, &tagStereoS1);
+  addLayoutRing(home_);
   addVolumeReadout(home_);
   addBezelRing(home_);
   addPageDots(home_, 0);
@@ -428,7 +469,9 @@ void build(TapHandler taps, ActionHandler actions, SceneHandler scenes,
   lv_label_set_text(lblStatus, "starting ...");
   lv_obj_set_style_text_font(lblStatus, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_set_style_text_color(lblStatus, lv_color_hex(TEXT_DIM), LV_PART_MAIN);
-  lv_obj_align(lblStatus, LV_ALIGN_CENTER, 0, 38);
+  // Below the dots: the dots are permanent, the status is transient, so the fixed element
+  // sits nearer the text it belongs to.
+  lv_obj_align(lblStatus, LV_ALIGN_CENTER, 0, 64);
 
   // ---- Screen 2: per-room volume ------------------------------------------------------
   vol_.screen = lv_obj_create(NULL);
@@ -450,6 +493,7 @@ void build(TapHandler taps, ActionHandler actions, SceneHandler scenes,
   lv_obj_clear_flag(btnStereoS2, LV_OBJ_FLAG_CHECKABLE);
   lv_obj_clear_flag(btnSync, LV_OBJ_FLAG_CHECKABLE);
 
+  addLayoutRing(vol_);
   addVolumeReadout(vol_);
   addBezelRing(vol_);
   addPageDots(vol_, 1);
@@ -470,6 +514,7 @@ void build(TapHandler taps, ActionHandler actions, SceneHandler scenes,
                         onSceneEvent, &tagHiFi);             //  9 o'clock
   btnTV    = makeButton(modes_.screen, "TV", RADIUS, 0, nullptr, LV_SYMBOL_VIDEO,
                         onSceneEvent, &tagTV);               //  3 o'clock
+  addLayoutRing(modes_);
   addVolumeReadout(modes_);
   addBezelRing(modes_);
   addPageDots(modes_, 2);

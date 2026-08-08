@@ -331,7 +331,20 @@ there. On reconnect the topology is re-resolved rather than trusting the cached 
   - **One animation drives all six layers** via a custom exec callback. Six independent
     animations would race and the layers could visibly tear apart during a fast spin.
   - The busy sweep stays thin and sits at the ring's outer edge.
-- **Page dots** at the bottom; without them the three-screen swipe chain is invisible.
+- **Four circles at 12/9/3/6 on a shared layout ring.** The volume readout has its own
+  circle at 6 o'clock completing the arrangement; it is OUTLINE-ONLY, not a filled face like
+  the buttons, because it is a readout and a matching face would imply it can be tapped.
+  Both figures live inside it: group volume large, per-room breakdown small.
+- **The layout ring and the volume circle share one stroke** (`RING_LINE_COLOR`,
+  `RING_LINE_W`) so they read as one construction line and cannot drift apart.
+- **The layout ring's box is `RADIUS * 2 + RING_LINE_W`, not `RADIUS * 2`.** LVGL draws
+  borders INWARD from the bounding box, so a 2*RADIUS box puts the stroke centreline at
+  RADIUS - w/2 and the ring runs visibly inside the button centres. Same class of error as
+  the split-button seam: whenever a stroke must land on a given radius or centreline, grow
+  the box by one stroke width. Do not "simplify" the +w away.
+- **Page dots sit under the now-playing line**, with the transient status BELOW them: the
+  permanent element belongs next to the text it relates to, the transient one gets pushed
+  out of the way.
 - **Gradients are short-range and low-contrast on purpose.** 16-bit colour bands visibly
   over a long ramp. `LV_DITHER_GRADIENT` exists if more range is ever wanted, at a RAM cost.
 - **Button faces stay LIGHT.** A dark glassy treatment looks better in the abstract but
